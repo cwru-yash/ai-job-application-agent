@@ -1,21 +1,42 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# User data (NEVER commit)
+profile.json
+resume.txt
+resume.pdf
+*.env
+.env.*
+!.env.example
 
-# Test binary, built with `go test -c`
-*.test
+# Runtime artifacts
+*.db
+tailored_resumes/
+cover_letters/
+chrome-workers/
+apply-workers/
+apply_logs/
+logs/
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
+# MCP configs (per-machine)
+.mcp*.json
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
 
-# Go workspace file
-go.work
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
