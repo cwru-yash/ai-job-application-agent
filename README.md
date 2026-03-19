@@ -191,6 +191,57 @@ applypilot status                       # Pipeline statistics
 applypilot dashboard                    # Open HTML results dashboard
 ```
 
+## Run Without Codex
+
+Manual daily run from this repo:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/run_daily.sh
+```
+
+The runner does:
+
+```bash
+applypilot run discover enrich score tailor cover pdf
+applypilot apply --headless --agent-backend command
+applypilot status
+```
+
+Default knobs:
+- `APPLYPILOT_DAILY_MIN_SCORE=7`
+- `APPLYPILOT_DAILY_APPLY_LIMIT=3`
+- `APPLYPILOT_DAILY_WORKERS=1`
+
+Override them for a single run:
+
+```bash
+APPLYPILOT_DAILY_APPLY_LIMIT=5 ./scripts/run_daily.sh
+```
+
+## Schedule Daily On macOS
+
+Install a `launchd` job that runs every day at 9:00 AM:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/install_launchd.sh 09:00
+```
+
+Useful commands:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.ai-job-application-agent.daily
+launchctl print gui/$(id -u)/com.ai-job-application-agent.daily
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ai-job-application-agent.daily.plist
+```
+
+Logs land in:
+
+```bash
+~/.applypilot/logs/
+```
+
 ## Local Command Backend
 
 The fork includes [`scripts/local_apply_agent.py`](scripts/local_apply_agent.py), a local Playwright-based apply agent that lets the

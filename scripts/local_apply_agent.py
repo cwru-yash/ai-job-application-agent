@@ -15,6 +15,7 @@ import secrets
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from email import header, policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -1080,6 +1081,7 @@ def resolve_field_value(field: dict[str, Any], profile: dict[str, Any], ctx: Pro
     ).lower()
     field_type = field.get("type", "")
     options = field.get("options") or []
+    today = datetime.now()
 
     if field.get("name") == "website":
         return None
@@ -1094,9 +1096,22 @@ def resolve_field_value(field: dict[str, Any], profile: dict[str, Any], ctx: Pro
     if field_type == "checkbox":
         if any(term in label for term in ("consent", "acknowledg", "agree", "terms", "privacy")):
             return True
+        disability_pref = applicant_value(profile, "disability").lower()
+        if "yes, i have a disability" in label or "have had one in the past" in label:
+            return disability_pref.startswith("yes")
+        if "no, i do not have a disability" in label:
+            return disability_pref.startswith("no")
+        if "i do not want to answer" in label:
+            return "decline" in disability_pref or "do not want" in disability_pref
         if any(term in label for term in ("veteran", "disability", "gender", "race", "ethnicity")):
             return False
         return None
+    if label.strip() == "month":
+        return today.strftime("%m")
+    if label.strip() == "day":
+        return today.strftime("%d")
+    if label.strip() == "year":
+        return today.strftime("%Y")
     if "email" in label:
         return applicant_value(profile, "email")
     if "first name" in label or "given name" in label:
@@ -1248,7 +1263,20 @@ def fill_text_by_label(page, pattern: str, value: str) -> bool:
 
 
 def choose_text_option(page, desired_texts: list[str]) -> bool:
-    tags = "[role='option'], li, button, [role='button'], div, span"
+    for text in desired_texts:
+        exact_patterns = [
+            "[role='option']",
+            "li[role='option']",
+            "[data-automation-id='promptOption']",
+            "button",
+            "[role='button']",
+        ]
+        for selector in exact_patterns:
+            locator = page.locator(selector).filter(has_text=re.compile(rf"^{re.escape(text)}$", re.I))
+            if click_locator(locator, wait_ms=500):
+                return True
+
+    tags = "[role='option'], li, [data-automation-id='promptOption'], button, [role='button'], div, span"
     locator = page.locator(tags)
     count = min(locator.count(), 120)
     for text in desired_texts:
@@ -1262,7 +1290,7 @@ def choose_text_option(page, desired_texts: list[str]) -> bool:
                 )
             except Exception:
                 continue
-            if not label or not text_matches_option(label, text):
+            if not label or len(label) > 80 or "\n" in label or not text_matches_option(label, text):
                 continue
             try:
                 candidate.click(timeout=3000)
@@ -1552,9 +1580,17 @@ def workday_fill_primary_questionnaire(
                 page.wait_for_timeout(400)
             except Exception:
                 continue
-            if choose_text_option(page, desired_options):
+            exact_option_clicked = False
+            for option_text in desired_options:
+                option = page.locator("li[role='option']").filter(
+                    has_text=re.compile(rf"^{re.escape(option_text)}$", re.I)
+                )
+                if click_locator(option, wait_ms=400):
+                    exact_option_clicked = True
+                    break
+            if not exact_option_clicked and choose_text_option(page, desired_options):
                 page.wait_for_timeout(400)
-            else:
+            elif not exact_option_clicked:
                 for text in desired_options:
                     option = page.get_by_role("option", name=re.compile(rf"^{re.escape(text)}$", re.I))
                     if option.count() and click_locator(option.first, wait_ms=400):
@@ -1566,6 +1602,49 @@ def workday_fill_primary_questionnaire(
             if any(text_matches_option(current, option) for option in desired_options):
                 changed += 1
                 break
+    return changed
+
+
+def workday_check_checkbox_label(page, label_pattern: str) -> bool:
+    locator = page.get_by_label(re.compile(label_pattern, re.I))
+    if not locator.count():
+        return False
+    try:
+        target = locator.first
+        if not target.is_checked():
+            target.check(timeout=3000)
+            page.wait_for_timeout(300)
+        return target.is_checked()
+    except Exception:
+        return False
+
+
+def workday_fill_self_identify(page, profile: dict[str, Any]) -> int:
+    body = page_text(page).lower()
+    if "voluntary self-identification of disability" not in body and "self identify" not in body:
+        return 0
+
+    changed = 0
+    today = datetime.now()
+    for label, value in (
+        (r"^Month$", today.strftime("%m")),
+        (r"^Day$", today.strftime("%d")),
+        (r"^Year$", today.strftime("%Y")),
+    ):
+        if fill_text_by_label(page, label, value):
+            changed += 1
+
+    disability_pref = applicant_value(profile, "disability").lower()
+    disability_label = None
+    if disability_pref.startswith("yes"):
+        disability_label = r"^Yes, I have a disability, or have had one in the past"
+    elif disability_pref.startswith("no"):
+        disability_label = r"^No, I do not have a disability and have not had one in the past"
+    elif "decline" in disability_pref or "do not want" in disability_pref:
+        disability_label = r"^I do not want to answer"
+    if disability_label and workday_check_checkbox_label(page, disability_label):
+        changed += 1
+
     return changed
 
 
@@ -1816,6 +1895,8 @@ def fill_workday_overrides(page, profile: dict[str, Any]) -> tuple[int, str | No
         if question_text.lower() in body.lower():
             if workday_answer_yes_no(page, question_text, answer):
                 changed += 1
+
+    changed += workday_fill_self_identify(page, profile)
 
     return changed, None
 
