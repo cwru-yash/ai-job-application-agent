@@ -1262,12 +1262,65 @@ def fill_text_by_label(page, pattern: str, value: str) -> bool:
         return False
 
 
-def choose_text_option(page, desired_texts: list[str]) -> bool:
+def visible_prompt_options(page, limit: int = 20) -> list[str]:
+    selectors = ", ".join(
+        [
+            "[role='option']",
+            "li[role='option']",
+            "[data-automation-id='promptOption']",
+            "[data-automation-id='menuItem']",
+            "[data-automation-id='promptOptionText']",
+        ]
+    )
+    try:
+        values = page.locator(selectors).evaluate_all(
+            """els => els.map(el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()).filter(Boolean)"""
+        )
+    except Exception:
+        return []
+
+    cleaned: list[str] = []
+    for value in values:
+        text = normalize_space(value)
+        if not text or text in cleaned:
+            continue
+        cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def choose_text_option(page, desired_texts: list[str], *, allow_first_visible: bool = False) -> bool:
+    option_snapshots: list[str] = []
+    prompt_selectors = [
+        "[role='option']",
+        "li[role='option']",
+        "[data-automation-id='promptOption']",
+        "[data-automation-id='menuItem']",
+    ]
+
+    def current_options() -> list[str]:
+        nonlocal option_snapshots
+        option_snapshots = visible_prompt_options(page)
+        return option_snapshots
+
+    for _ in range(8):
+        current_options()
+        for text in desired_texts:
+            for selector in prompt_selectors:
+                locator = page.locator(selector).filter(has_text=re.compile(rf"^{re.escape(text)}$", re.I))
+                if click_locator(locator, wait_ms=500):
+                    return True
+        if option_snapshots:
+            break
+        page.wait_for_timeout(250)
+
     for text in desired_texts:
         exact_patterns = [
             "[role='option']",
             "li[role='option']",
             "[data-automation-id='promptOption']",
+            "[data-automation-id='menuItem']",
             "button",
             "[role='button']",
         ]
@@ -1298,6 +1351,23 @@ def choose_text_option(page, desired_texts: list[str]) -> bool:
                 return True
             except Exception:
                 continue
+
+    if allow_first_visible:
+        ignored_fragments = (
+            "search",
+            "select one",
+            "no matches",
+            "no results",
+            "loading",
+        )
+        for label in option_snapshots or current_options():
+            lower = label.lower()
+            if any(fragment in lower for fragment in ignored_fragments):
+                continue
+            for selector in prompt_selectors + ["button", "[role='button']"]:
+                locator = page.locator(selector).filter(has_text=re.compile(rf"^{re.escape(label)}$", re.I))
+                if click_locator(locator, wait_ms=500):
+                    return True
     return False
 
 
@@ -1404,7 +1474,13 @@ def workday_mark_active_control(page) -> str | None:
 
 
 def workday_choose_from_control(
-    page, locator, desired_options: list[str], error_fragments: list[str], *, had_error: bool = False
+    page,
+    locator,
+    desired_options: list[str],
+    error_fragments: list[str],
+    *,
+    had_error: bool = False,
+    allow_first_visible: bool = False,
 ) -> bool:
     if not locator or not locator.count():
         return False
@@ -1424,25 +1500,36 @@ def workday_choose_from_control(
             pass
         try:
             locator.type(text, delay=20, timeout=5000)
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(900)
         except Exception:
             try:
                 page.keyboard.type(text, delay=20)
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(900)
             except Exception:
                 pass
-        if choose_text_option(page, [text]):
+        if choose_text_option(page, [text], allow_first_visible=allow_first_visible):
             if workday_selection_committed(page, locator, [text], error_fragments, had_error=had_error):
                 return True
         try:
             locator.press("ArrowDown")
             locator.press("Enter")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(700)
         except Exception:
             try:
                 page.keyboard.press("ArrowDown")
                 page.keyboard.press("Enter")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(700)
+            except Exception:
+                pass
+        if workday_selection_committed(page, locator, [text], error_fragments, had_error=had_error):
+            return True
+        try:
+            locator.press("Tab")
+            page.wait_for_timeout(400)
+        except Exception:
+            try:
+                page.keyboard.press("Tab")
+                page.wait_for_timeout(400)
             except Exception:
                 pass
         if workday_selection_committed(page, locator, [text], error_fragments, had_error=had_error):
@@ -1544,6 +1631,97 @@ def workday_searchable_select_by_field(
     return False
 
 
+def workday_source_field_locator(page):
+    try:
+        fields = annotate_fields(page)
+    except Exception:
+        return None
+
+    for field in fields:
+        label_text = " ".join(
+            str(value or "") for value in (field.get("label"), field.get("name"), field.get("placeholder"))
+        ).lower()
+        if "how did you hear about us" in label_text or label_text.startswith("source"):
+            return locator_for(page, field["apgId"])
+    locator = page.get_by_label(re.compile(r"How Did You Hear About Us|Source", re.I)).first
+    return locator if locator.count() else None
+
+
+def workday_source_field_committed(page, desired_options: list[str]) -> bool:
+    container = page.locator("[data-automation-id='formField-source']").first
+    if not container.count():
+        return False
+    try:
+        context = normalize_space(container.inner_text(timeout=1500))
+    except Exception:
+        return False
+    lower = context.lower()
+    if "0 items selected" not in lower and "item selected" in lower:
+        return True
+    return any(text_matches_option(context, option) for option in desired_options if option)
+
+
+def workday_fill_source_field(page, desired_options: list[str]) -> bool:
+    locator = workday_source_field_locator(page)
+    if locator is None or not locator.count():
+        return False
+
+    fragments = ["how did you hear about us", "source"]
+    container = page.locator("[data-automation-id='formField-source']").first
+    if container.count():
+        prompt_button = container.locator(
+            "[data-automation-id='promptSearchButton'], [data-automation-id='promptIcon']"
+        ).first
+        if prompt_button.count():
+            try:
+                prompt_button.scroll_into_view_if_needed(timeout=3000)
+                prompt_button.click(timeout=3000, force=True)
+                page.wait_for_timeout(700)
+            except Exception:
+                pass
+            options = visible_prompt_options(page, limit=12)
+            log(f"ACTION: Workday source options={options}")
+            for option_text in desired_options:
+                option = page.locator("[data-automation-id='menuItem'], [role='option']").filter(
+                    has_text=re.compile(rf"^{re.escape(option_text)}$", re.I)
+                ).first
+                if option.count():
+                    try:
+                        option.click(timeout=3000, force=True)
+                        page.wait_for_timeout(700)
+                    except Exception:
+                        continue
+                    if workday_source_field_committed(page, [option_text]):
+                        return True
+            if choose_text_option(page, desired_options, allow_first_visible=True):
+                page.wait_for_timeout(600)
+                if workday_source_field_committed(page, desired_options):
+                    return True
+
+    if workday_choose_from_control(
+        page,
+        locator,
+        desired_options,
+        fragments,
+        had_error=workday_error_present(page, fragments),
+        allow_first_visible=True,
+    ):
+        return True
+
+    try:
+        locator.click(timeout=3000)
+        page.wait_for_timeout(600)
+        options = visible_prompt_options(page, limit=12)
+        if options:
+            log(f"ACTION: Workday source options={options}")
+            if choose_text_option(page, options[:3], allow_first_visible=True):
+                page.wait_for_timeout(500)
+                return workday_source_field_committed(page, options[:3]) or not workday_error_present(page, fragments)
+    except Exception:
+        return False
+    return False
+
+
 def workday_fill_primary_questionnaire(
     page, question_answers: list[tuple[list[str], list[str]]]
 ) -> int:
@@ -1581,8 +1759,9 @@ def workday_fill_primary_questionnaire(
             except Exception:
                 continue
             exact_option_clicked = False
+            options = page.locator("li[role='option'], [role='option'], [data-automation-id='menuItem']")
             for option_text in desired_options:
-                option = page.locator("li[role='option']").filter(
+                option = options.filter(
                     has_text=re.compile(rf"^{re.escape(option_text)}$", re.I)
                 )
                 if click_locator(option, wait_ms=400):
@@ -1723,7 +1902,9 @@ def workday_pick_select_one(page, error_label: str, desired_options: list[str]) 
             return True
     container = None
     pattern = re.compile(re.escape(error_label[:80]), re.I)
-    candidates = page.locator("div, section, li, fieldset").filter(has_text=pattern)
+    candidates = page.locator(
+        "[data-automation-id^='formField-'], fieldset, [role='group'], section, li, div"
+    ).filter(has_text=pattern)
     for idx in range(min(candidates.count(), 20)):
         candidate = candidates.nth(idx)
         button = candidate.locator("button").first
@@ -1764,7 +1945,7 @@ def workday_pick_select_one(page, error_label: str, desired_options: list[str]) 
         if not opened:
             return False
     else:
-        select_buttons = page.locator("button, [role='button'], [role='combobox'], div").filter(
+        select_buttons = page.locator("button[id^='primaryQuestionnaire--'], button, [role='button'], [role='combobox'], div").filter(
             has_text=re.compile(r"^Select One$", re.I)
         )
         opened = False
@@ -1782,6 +1963,13 @@ def workday_pick_select_one(page, error_label: str, desired_options: list[str]) 
         if not opened:
             return False
     page.wait_for_timeout(500)
+    options = page.locator("li[role='option'], [role='option'], [data-automation-id='menuItem']")
+    for text in desired_options:
+        option = options.filter(has_text=re.compile(rf"^{re.escape(text)}$", re.I)).first
+        if click_locator(option, wait_ms=300):
+            page.wait_for_timeout(300)
+            if not workday_error_present(page, [error_label]):
+                return True
     if choose_text_option(page, desired_options):
         page.wait_for_timeout(300)
         if not workday_error_present(page, [error_label]):
@@ -1810,6 +1998,65 @@ def workday_profile_requirements(page, profile: dict[str, Any]) -> str | None:
     if "Address Line 1" in text and not applicant_value(profile, "address"):
         return "missing_profile_address"
     return None
+
+
+def workday_select_one_answers(profile: dict[str, Any]) -> list[tuple[list[str], list[str]]]:
+    yes_options = ["Yes", "Sí", "Si"]
+    no_options = ["No"]
+    return [
+        (
+            [
+                "legally authorized to work",
+                "authorized to work in the country",
+                "authorized to legally work",
+                "legally work in the job location",
+                "legalmente autorizado para trabajar",
+            ],
+            yes_options if applicant_value(profile, "authorized") == "Yes" else no_options,
+        ),
+        (
+            [
+                "require sponsorship",
+                "require visa sponsorship",
+                "sponsorship to legally work",
+                "sponsorship to work in the job location",
+                "require sponsorship for employment visa status",
+                "requiere ahora",
+                "patrocinio para obtener el estado de visa",
+            ],
+            yes_options if applicant_value(profile, "sponsorship") == "Yes" else no_options,
+        ),
+        (
+            [
+                "restrictive covenants",
+                "non compete",
+                "confidentiality agreements",
+                "contractual obligations",
+                "acuerdos restrictivos",
+            ],
+            no_options,
+        ),
+        (
+            [
+                "current contractor at any thomson reuters location",
+                "currently working for",
+                "independent, vendor, or temporary worker",
+                "actualmente un contractor",
+            ],
+            no_options,
+        ),
+        (
+            [
+                "previously worked for thomson reuters",
+                "have previously worked for thomson reuters",
+                "have you worked for",
+                "worked for netflix",
+                "worked for any of",
+                "subsidiaries in the past",
+            ],
+            no_options,
+        ),
+    ]
 
 
 def fill_workday_overrides(page, profile: dict[str, Any]) -> tuple[int, str | None]:
@@ -1842,7 +2089,9 @@ def fill_workday_overrides(page, profile: dict[str, Any]) -> tuple[int, str | No
         "Employee Referral",
         "Other",
     ]
-    if workday_searchable_select_by_field(
+    if workday_fill_source_field(page, source_options):
+        changed += 1
+    elif workday_searchable_select_by_field(
         page,
         ["how did you hear about us", "source"],
         source_options,
@@ -1872,14 +2121,7 @@ def fill_workday_overrides(page, profile: dict[str, Any]) -> tuple[int, str | No
                 changed += 1
                 break
 
-    yes_options = ["Yes", "Sí", "Si"]
-    no_options = ["No"]
-    select_one_answers = [
-        (["legally authorized to work", "legalmente autorizado para trabajar"], yes_options if applicant_value(profile, "authorized") == "Yes" else no_options),
-        (["require sponsorship for employment visa status", "requiere ahora", "patrocinio para obtener el estado de visa"], yes_options if applicant_value(profile, "sponsorship") == "Yes" else no_options),
-        (["restrictive covenants", "acuerdos restrictivos"], no_options),
-        (["current contractor at any thomson reuters location", "actualmente un contractor"], no_options),
-    ]
+    select_one_answers = workday_select_one_answers(profile)
     changed += workday_fill_primary_questionnaire(page, select_one_answers)
     for fragments, desired_options in select_one_answers:
         if any(fragment in body.lower() for fragment in fragments):
