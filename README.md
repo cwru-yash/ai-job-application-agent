@@ -203,15 +203,24 @@ cd /Users/yashm/Documents/ai-job-application-agent
 The runner does:
 
 ```bash
-applypilot run discover enrich score tailor cover pdf
-applypilot apply --headless --agent-backend command
+python3 scripts/daily_pipeline.py
+applypilot apply --limit 30 --min-score 8 --headless --agent-backend command
 applypilot status
 ```
 
 Default knobs:
-- `APPLYPILOT_DAILY_MIN_SCORE=7`
-- `APPLYPILOT_DAILY_APPLY_LIMIT=3`
+- `APPLYPILOT_DAILY_MIN_SCORE=8`
+- `APPLYPILOT_DAILY_SCORE_LIMIT=90`
+- `APPLYPILOT_DAILY_TAILOR_LIMIT=35`
+- `APPLYPILOT_DAILY_COVER_LIMIT=35`
+- `APPLYPILOT_DAILY_APPLY_LIMIT=30`
+- `APPLYPILOT_DAILY_VALIDATION=lenient`
 - `APPLYPILOT_DAILY_WORKERS=1`
+
+Why this is better:
+- discovery and enrichment still run daily for fresh jobs
+- scoring, tailoring, and cover-letter generation are budgeted instead of trying to clear the whole backlog
+- the run is quieter and more likely to reach the apply stage every day on a smaller local machine
 
 Override them for a single run:
 
