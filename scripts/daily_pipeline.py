@@ -36,7 +36,25 @@ def run_stage(label: str, fn: Callable[[], object]) -> object:
     return result
 
 
-def main() -> int:
+def load_daily_pipeline_settings() -> dict[str, object]:
+    return {
+        "discover_enabled": env_flag("APPLYPILOT_DAILY_DISCOVER", True),
+        "enrich_enabled": env_flag("APPLYPILOT_DAILY_ENRICH", True),
+        "score_limit": env_int("APPLYPILOT_DAILY_SCORE_LIMIT", 90),
+        "tailor_limit": env_int("APPLYPILOT_DAILY_TAILOR_LIMIT", 35),
+        "cover_limit": env_int("APPLYPILOT_DAILY_COVER_LIMIT", 35),
+        "discover_workers": env_int("APPLYPILOT_DAILY_DISCOVER_WORKERS", 1),
+        "enrich_workers": env_int("APPLYPILOT_DAILY_ENRICH_WORKERS", 1),
+        "min_score": env_int("APPLYPILOT_DAILY_MIN_SCORE", 8),
+        "validation_mode": os.environ.get("APPLYPILOT_DAILY_VALIDATION", "lenient"),
+    }
+
+
+def run_daily_pipeline_once(
+    settings: dict[str, object] | None = None,
+    *,
+    emit_settings: bool = True,
+) -> dict:
     from applypilot.config import ensure_dirs, load_env
     from applypilot.database import get_stats, init_db
     from applypilot.discovery.jobspy import run_discovery
@@ -52,31 +70,23 @@ def main() -> int:
     ensure_dirs()
     init_db()
 
-    discover_enabled = env_flag("APPLYPILOT_DAILY_DISCOVER", True)
-    enrich_enabled = env_flag("APPLYPILOT_DAILY_ENRICH", True)
-    score_limit = env_int("APPLYPILOT_DAILY_SCORE_LIMIT", 90)
-    tailor_limit = env_int("APPLYPILOT_DAILY_TAILOR_LIMIT", 35)
-    cover_limit = env_int("APPLYPILOT_DAILY_COVER_LIMIT", 35)
-    discover_workers = env_int("APPLYPILOT_DAILY_DISCOVER_WORKERS", 1)
-    enrich_workers = env_int("APPLYPILOT_DAILY_ENRICH_WORKERS", 1)
-    min_score = env_int("APPLYPILOT_DAILY_MIN_SCORE", 8)
-    validation_mode = os.environ.get("APPLYPILOT_DAILY_VALIDATION", "lenient")
+    resolved = load_daily_pipeline_settings()
+    if settings:
+        resolved.update(settings)
 
-    print("Daily pipeline settings:", flush=True)
-    print(
-        {
-            "discover_enabled": discover_enabled,
-            "enrich_enabled": enrich_enabled,
-            "score_limit": score_limit,
-            "tailor_limit": tailor_limit,
-            "cover_limit": cover_limit,
-            "discover_workers": discover_workers,
-            "enrich_workers": enrich_workers,
-            "min_score": min_score,
-            "validation_mode": validation_mode,
-        },
-        flush=True,
-    )
+    discover_enabled = bool(resolved["discover_enabled"])
+    enrich_enabled = bool(resolved["enrich_enabled"])
+    score_limit = int(resolved["score_limit"])
+    tailor_limit = int(resolved["tailor_limit"])
+    cover_limit = int(resolved["cover_limit"])
+    discover_workers = int(resolved["discover_workers"])
+    enrich_workers = int(resolved["enrich_workers"])
+    min_score = int(resolved["min_score"])
+    validation_mode = str(resolved["validation_mode"])
+
+    if emit_settings:
+        print("Daily pipeline settings:", flush=True)
+        print(resolved, flush=True)
 
     if discover_enabled:
         run_stage("discover: jobspy", run_discovery)
@@ -90,19 +100,37 @@ def main() -> int:
     else:
         print("\n=== enrich skipped ===", flush=True)
 
-    run_stage("score", lambda: run_scoring(limit=score_limit))
-    run_stage(
-        "tailor",
-        lambda: run_tailoring(min_score=min_score, limit=tailor_limit, validation_mode=validation_mode),
-    )
-    run_stage(
-        "cover",
-        lambda: run_cover_letters(min_score=min_score, limit=cover_limit, validation_mode=validation_mode),
-    )
+    if score_limit > 0:
+        run_stage("score", lambda: run_scoring(limit=score_limit))
+    else:
+        print("\n=== score skipped ===", flush=True)
+
+    if tailor_limit > 0:
+        run_stage(
+            "tailor",
+            lambda: run_tailoring(min_score=min_score, limit=tailor_limit, validation_mode=validation_mode),
+        )
+    else:
+        print("\n=== tailor skipped ===", flush=True)
+
+    if cover_limit > 0:
+        run_stage(
+            "cover",
+            lambda: run_cover_letters(min_score=min_score, limit=cover_limit, validation_mode=validation_mode),
+        )
+    else:
+        print("\n=== cover skipped ===", flush=True)
+
     run_stage("pdf", batch_convert)
 
     print("\nFinal stats:", flush=True)
-    print(get_stats(), flush=True)
+    stats = get_stats()
+    print(stats, flush=True)
+    return stats
+
+
+def main() -> int:
+    run_daily_pipeline_once()
     return 0
 
 

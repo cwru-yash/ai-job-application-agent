@@ -203,8 +203,7 @@ cd /Users/yashm/Documents/ai-job-application-agent
 The runner does:
 
 ```bash
-python3 scripts/daily_pipeline.py
-applypilot apply --limit 30 --min-score 8 --headless --agent-backend command
+python3 scripts/daily_orchestrator.py
 applypilot status
 ```
 
@@ -213,13 +212,18 @@ Default knobs:
 - `APPLYPILOT_DAILY_SCORE_LIMIT=90`
 - `APPLYPILOT_DAILY_TAILOR_LIMIT=35`
 - `APPLYPILOT_DAILY_COVER_LIMIT=35`
-- `APPLYPILOT_DAILY_APPLY_LIMIT=30`
+- `APPLYPILOT_DAILY_TARGET_SUBMISSIONS=25`
+- `APPLYPILOT_DAILY_APPLY_BATCH=5`
+- `APPLYPILOT_DAILY_MAX_CYCLES=6`
 - `APPLYPILOT_DAILY_VALIDATION=lenient`
 - `APPLYPILOT_DAILY_WORKERS=1`
+- `APPLYPILOT_APPLY_RETRY_COOLDOWN_HOURS=18`
 
 Why this is better:
 - discovery and enrichment still run daily for fresh jobs
 - scoring, tailoring, and cover-letter generation are budgeted instead of trying to clear the whole backlog
+- the controller loops toward completed submissions rather than firing one big apply burst
+- failed jobs cool down before retry, so fresh ready jobs get priority
 - the run is quieter and more likely to reach the apply stage every day on a smaller local machine
 
 Override them for a single run:

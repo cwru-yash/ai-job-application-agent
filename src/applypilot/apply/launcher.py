@@ -8,6 +8,7 @@ result, and updates the database. Supports parallel workers via --workers.
 import atexit
 import json
 import logging
+import os
 import platform
 import re
 import signal
@@ -16,7 +17,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rich.console import Console
@@ -79,6 +80,40 @@ def _make_mcp_config(cdp_port: int) -> dict:
     }
 
 
+def _apply_retry_cooldown_hours() -> int:
+    raw = (os.environ.get("APPLYPILOT_APPLY_RETRY_COOLDOWN_HOURS") or "").strip()
+    if not raw:
+        return 18
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 18
+
+
+def _retry_allowed(row, now_dt: datetime) -> bool:
+    status = (row["apply_status"] or "").strip().lower()
+    if status != "failed":
+        return True
+
+    cooldown_hours = _apply_retry_cooldown_hours()
+    if cooldown_hours <= 0:
+        return True
+
+    last_attempted_at = row["last_attempted_at"]
+    if not last_attempted_at:
+        return True
+
+    try:
+        attempted_dt = datetime.fromisoformat(last_attempted_at)
+    except ValueError:
+        return True
+
+    if attempted_dt.tzinfo is None:
+        attempted_dt = attempted_dt.replace(tzinfo=timezone.utc)
+
+    return (now_dt - attempted_dt) >= timedelta(hours=cooldown_hours)
+
+
 # ---------------------------------------------------------------------------
 # Database operations
 # ---------------------------------------------------------------------------
@@ -123,9 +158,10 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             if blocked_patterns:
                 url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
-            row = conn.execute(f"""
+            rows = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path,
+                       apply_status, last_attempted_at
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status = 'failed')
@@ -133,11 +169,14 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
-                ORDER BY fit_score DESC, url
-                LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+                ORDER BY CASE WHEN apply_status = 'failed' THEN 1 ELSE 0 END,
+                         fit_score DESC, url
+                LIMIT 50
+            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchall()
+            now_dt = datetime.now(timezone.utc)
+            row = next((candidate for candidate in rows if _retry_allowed(candidate, now_dt)), None)
 
-        if not row:
+        if row is None:
             conn.rollback()
             return None
 
