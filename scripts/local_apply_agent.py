@@ -264,6 +264,8 @@ def mailbox_config(email_address: str) -> dict[str, Any]:
         or os.environ.get("APPLYPILOT_MAIL_HOST")
         or default_imap_host(user)
     ).strip()
+    if host.lower() == "imap.gmail.com":
+        password = re.sub(r"\s+", "", password)
     port_raw = (
         os.environ.get("APPLYPILOT_IMAP_PORT")
         or os.environ.get("APPLYPILOT_MAIL_PORT")
@@ -534,9 +536,19 @@ def complete_workday_password_reset(page, host: str, email: str) -> bool:
     if not submitted:
         submitted = click_button_exact(page, "Reset Password", submit_only=True)
     if not submitted:
+        submitted = click_button_exact(page, "Submit", submit_only=True)
+    if not submitted:
+        submit_buttons = page.get_by_role("button", name=re.compile(r"^Submit$", re.I))
+        for idx in range(submit_buttons.count()):
+            if click_locator(submit_buttons.nth(idx), wait_ms=1000):
+                submitted = True
+                break
+    if not submitted:
         submitted = click_exact_any(page, "Reset Password", use_last=True)
     if not submitted:
         submitted = click_exact_any(page, "Save", use_last=True)
+    if not submitted:
+        submitted = click_exact_any(page, "Submit", use_last=True)
     if not submitted:
         submitted = click_exact_any(page, "Continue", use_last=True)
     if not submitted:
@@ -551,8 +563,8 @@ def complete_workday_password_reset(page, host: str, email: str) -> bool:
     if not submitted:
         return False
 
-    page.wait_for_timeout(3000)
-    text = page_text(page)
+    page.wait_for_timeout(5000)
+    text = f"{page_text(page)} {' '.join(visible_error_texts(page))}"
     if contains_any(
         text,
         (
@@ -1237,15 +1249,176 @@ def fill_text_by_label(page, pattern: str, value: str) -> bool:
 
 def choose_text_option(page, desired_texts: list[str]) -> bool:
     tags = "[role='option'], li, button, [role='button'], div, span"
+    locator = page.locator(tags)
+    count = min(locator.count(), 120)
     for text in desired_texts:
-        locator = page.locator(tags).filter(has_text=re.compile(rf"^{re.escape(text)}$", re.I))
-        if locator.count():
+        for idx in range(count):
+            candidate = locator.nth(idx)
             try:
-                locator.first.click(timeout=3000)
+                label = normalize_space(
+                    candidate.evaluate(
+                        """el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()"""
+                    )
+                )
+            except Exception:
+                continue
+            if not label or not text_matches_option(label, text):
+                continue
+            try:
+                candidate.click(timeout=3000)
                 page.wait_for_timeout(500)
                 return True
             except Exception:
                 continue
+    return False
+
+
+def text_matches_option(candidate: str, desired: str) -> bool:
+    def squash(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    candidate_norm = squash(candidate)
+    desired_norm = squash(desired)
+    if not candidate_norm or not desired_norm:
+        return False
+    return (
+        candidate_norm == desired_norm
+        or desired_norm in candidate_norm
+        or candidate_norm in desired_norm
+    )
+
+
+def workday_error_present(page, fragments: list[str]) -> bool:
+    haystacks = visible_error_texts(page) + [button for button in visible_buttons(page) if button.lower().startswith("error")]
+    if not haystacks:
+        return False
+    lowered = [normalize_space(item).lower() for item in haystacks if item]
+    return any(fragment.lower() in item for fragment in fragments for item in lowered if fragment)
+
+
+def workday_locator_context(locator) -> str:
+    try:
+        return normalize_space(
+            locator.evaluate(
+                """el => {
+                    const root = el.closest(
+                      '[data-automation-id="formField"], [data-automation-id="fieldSetContent"], [role="group"], fieldset, section, li'
+                    ) || el.parentElement || el;
+                    return (root.innerText || root.textContent || '').trim();
+                }"""
+            )
+        )
+    except Exception:
+        return ""
+
+
+def workday_selected_item_text(page) -> str:
+    selectors = ", ".join(
+        [
+            "[data-automation-id='selectedItem']",
+            "[data-automation-id='multiselectTag']",
+            "[data-automation-id='promptOption']",
+            "[data-automation-id='selectedValue']",
+        ]
+    )
+    try:
+        return normalize_space(
+            " ".join(
+                page.locator(selectors).evaluate_all(
+                    """els => els.map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)"""
+                )
+            )
+        )
+    except Exception:
+        return ""
+
+
+def workday_selection_committed(
+    page, locator, desired_options: list[str], error_fragments: list[str], *, had_error: bool = False
+) -> bool:
+    if had_error and error_fragments and not workday_error_present(page, error_fragments):
+        return True
+    try:
+        value = normalize_space(locator.input_value(timeout=1000))
+        if any(text_matches_option(value, option) for option in desired_options if option):
+            return True
+        if value and value.lower() not in {"search", "select one"}:
+            return True
+    except Exception:
+        pass
+    context_text = workday_locator_context(locator)
+    if any(text_matches_option(context_text, option) for option in desired_options if option):
+        return True
+    selected_text = workday_selected_item_text(page)
+    return any(text_matches_option(selected_text, option) for option in desired_options if option)
+
+
+def workday_mark_active_control(page) -> str | None:
+    try:
+        return page.evaluate(
+            """() => {
+                document.querySelectorAll('[data-apg-active-control]').forEach(
+                  el => el.removeAttribute('data-apg-active-control')
+                );
+                let el = document.activeElement;
+                if (!el) return null;
+                const target = el.matches('input, button, [role="combobox"], [role="textbox"], [aria-haspopup="listbox"]')
+                  ? el
+                  : el.closest('input, button, [role="combobox"], [role="textbox"], [aria-haspopup="listbox"]');
+                if (!target) return null;
+                const marker = `apg-active-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                target.setAttribute('data-apg-active-control', marker);
+                return marker;
+            }"""
+        )
+    except Exception:
+        return None
+
+
+def workday_choose_from_control(
+    page, locator, desired_options: list[str], error_fragments: list[str], *, had_error: bool = False
+) -> bool:
+    if not locator or not locator.count():
+        return False
+    for text in desired_options:
+        try:
+            locator.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        try:
+            locator.click(timeout=3000)
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+        try:
+            locator.fill("", timeout=2000)
+        except Exception:
+            pass
+        try:
+            locator.type(text, delay=20, timeout=5000)
+            page.wait_for_timeout(400)
+        except Exception:
+            try:
+                page.keyboard.type(text, delay=20)
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+        if choose_text_option(page, [text]):
+            if workday_selection_committed(page, locator, [text], error_fragments, had_error=had_error):
+                return True
+        try:
+            locator.press("ArrowDown")
+            locator.press("Enter")
+            page.wait_for_timeout(500)
+        except Exception:
+            try:
+                page.keyboard.press("ArrowDown")
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+        if workday_selection_committed(page, locator, [text], error_fragments, had_error=had_error):
+            return True
     return False
 
 
@@ -1291,35 +1464,25 @@ def workday_select_button_option(page, button_id: str, desired_options: list[str
     return False
 
 
-def workday_searchable_select_by_label(page, pattern: str, desired_options: list[str]) -> bool:
+def workday_searchable_select_by_label(
+    page, pattern: str, desired_options: list[str], error_fragments: list[str] | None = None
+) -> bool:
     locator = page.get_by_label(re.compile(pattern, re.I)).first
     if not locator.count():
         return False
-    try:
-        locator.click(timeout=3000)
-        page.wait_for_timeout(300)
-    except Exception:
-        return False
-
-    for text in desired_options:
-        try:
-            locator.fill("", timeout=3000)
-            locator.type(text, delay=20, timeout=5000)
-            page.wait_for_timeout(500)
-            if choose_text_option(page, [text]):
-                return True
-            locator.press("ArrowDown")
-            locator.press("Enter")
-            page.wait_for_timeout(500)
-            value = normalize_space(locator.input_value(timeout=2000))
-            if value and value.lower() != "search":
-                return True
-        except Exception:
-            continue
-    return False
+    fragments = error_fragments or [pattern]
+    return workday_choose_from_control(
+        page,
+        locator,
+        desired_options,
+        fragments,
+        had_error=workday_error_present(page, fragments),
+    )
 
 
-def workday_searchable_select_by_field(page, label_fragments: list[str], desired_options: list[str]) -> bool:
+def workday_searchable_select_by_field(
+    page, label_fragments: list[str], desired_options: list[str], error_fragments: list[str] | None = None
+) -> bool:
     lower_fragments = [fragment.lower() for fragment in label_fragments if fragment]
     if not lower_fragments:
         return False
@@ -1341,27 +1504,69 @@ def workday_searchable_select_by_field(page, label_fragments: list[str], desired
         except Exception:
             continue
 
-        for text in desired_options:
+        fragments = error_fragments or lower_fragments
+        if workday_choose_from_control(
+            page,
+            locator,
+            desired_options,
+            fragments,
+            had_error=workday_error_present(page, fragments),
+        ):
+            return True
+    return False
+
+
+def workday_fill_primary_questionnaire(
+    page, question_answers: list[tuple[list[str], list[str]]]
+) -> int:
+    buttons = page.locator("button[id^='primaryQuestionnaire--']")
+    button_count = buttons.count()
+    if not button_count:
+        return 0
+    changed = 0
+    for idx in range(button_count):
+        button = buttons.nth(idx)
+        try:
+            current = normalize_space(button.inner_text(timeout=1000))
+            context_text = normalize_space(
+                button.evaluate(
+                    """el => (el.closest('fieldset, section, div.css-gvoll6, div.css-1obf64m')?.innerText || '').trim()"""
+                )
+            ).lower()
+        except Exception:
+            current = ""
+            context_text = ""
+        desired_options = None
+        for fragments, options in question_answers:
+            if any(fragment in context_text for fragment in fragments):
+                desired_options = options
+                break
+        if not desired_options:
+            continue
+        if any(text_matches_option(current, option) for option in desired_options):
+            continue
+        for _ in range(2):
             try:
-                locator.fill("", timeout=3000)
-                locator.type(text, delay=20, timeout=5000)
-                page.wait_for_timeout(500)
-                option = page.get_by_role("option", name=re.compile(re.escape(text), re.I))
-                if option.count():
-                    option.first.click(timeout=3000)
-                    page.wait_for_timeout(500)
-                elif choose_text_option(page, [text]):
-                    page.wait_for_timeout(300)
-                else:
-                    locator.press("ArrowDown")
-                    locator.press("Enter")
-                    page.wait_for_timeout(500)
-                value = normalize_space(locator.input_value(timeout=2000))
-                if value and value.lower() != "search":
-                    return True
+                button.scroll_into_view_if_needed(timeout=3000)
+                button.click(timeout=3000)
+                page.wait_for_timeout(400)
             except Exception:
                 continue
-    return False
+            if choose_text_option(page, desired_options):
+                page.wait_for_timeout(400)
+            else:
+                for text in desired_options:
+                    option = page.get_by_role("option", name=re.compile(rf"^{re.escape(text)}$", re.I))
+                    if option.count() and click_locator(option.first, wait_ms=400):
+                        break
+            try:
+                current = normalize_space(button.inner_text(timeout=1000))
+            except Exception:
+                current = ""
+            if any(text_matches_option(current, option) for option in desired_options):
+                changed += 1
+                break
+    return changed
 
 
 def preferred_skills(profile: dict[str, Any]) -> list[str]:
@@ -1426,6 +1631,17 @@ def workday_upload_autofill_resume(page, ctx: PromptContext) -> bool:
 def workday_pick_select_one(page, error_label: str, desired_options: list[str]) -> bool:
     click_contains(page, [f"Error-{error_label}"], tags="button")
     page.wait_for_timeout(300)
+    active_marker = workday_mark_active_control(page)
+    if active_marker:
+        active_control = page.locator(f'[data-apg-active-control="{active_marker}"]').first
+        if workday_choose_from_control(
+            page,
+            active_control,
+            desired_options,
+            [error_label],
+            had_error=workday_error_present(page, [error_label]),
+        ):
+            return True
     container = None
     pattern = re.compile(re.escape(error_label[:80]), re.I)
     candidates = page.locator("div, section, li, fieldset").filter(has_text=pattern)
@@ -1455,6 +1671,18 @@ def workday_pick_select_one(page, error_label: str, desired_options: list[str]) 
                 opened = True
                 break
         if not opened:
+            inputs = container.locator("input, [role='combobox'], [role='textbox']")
+            for idx in range(min(inputs.count(), 4)):
+                candidate = inputs.nth(idx)
+                if workday_choose_from_control(
+                    page,
+                    candidate,
+                    desired_options,
+                    [error_label],
+                    had_error=workday_error_present(page, [error_label]),
+                ):
+                    return True
+        if not opened:
             return False
     else:
         select_buttons = page.locator("button, [role='button'], [role='combobox'], div").filter(
@@ -1476,14 +1704,17 @@ def workday_pick_select_one(page, error_label: str, desired_options: list[str]) 
             return False
     page.wait_for_timeout(500)
     if choose_text_option(page, desired_options):
-        return True
+        page.wait_for_timeout(300)
+        if not workday_error_present(page, [error_label]):
+            return True
     for text in desired_options:
         try:
             page.keyboard.type(text, delay=25)
             page.keyboard.press("ArrowDown")
             page.keyboard.press("Enter")
             page.wait_for_timeout(500)
-            return True
+            if not workday_error_present(page, [error_label]):
+                return True
         except Exception:
             continue
     return False
@@ -1521,10 +1752,30 @@ def fill_workday_overrides(page, profile: dict[str, Any]) -> tuple[int, str | No
     if fill_text_by_label(page, r"Phone Extension", ""):
         changed += 1
 
-    source_options = ["LinkedIn", "LinkedIn Ad", "Indeed", "Glassdoor", "Employee Referral", "Other"]
-    if workday_searchable_select_by_field(page, ["how did you hear about us", "source"], source_options):
+    source_options = [
+        "Job Boards",
+        "Applied",
+        "LinkedIn",
+        "Indeed",
+        "Glassdoor",
+        "Sourced",
+        "Referred",
+        "Employee Referral",
+        "Other",
+    ]
+    if workday_searchable_select_by_field(
+        page,
+        ["how did you hear about us", "source"],
+        source_options,
+        error_fragments=["how did you hear about us", "source"],
+    ):
         changed += 1
-    elif workday_searchable_select_by_label(page, r"How Did You Hear About Us", source_options):
+    elif workday_searchable_select_by_label(
+        page,
+        r"How Did You Hear About Us",
+        source_options,
+        error_fragments=["how did you hear about us", "source"],
+    ):
         changed += 1
     elif workday_select_button_option(page, "source--source", source_options):
         changed += 1
@@ -1550,6 +1801,7 @@ def fill_workday_overrides(page, profile: dict[str, Any]) -> tuple[int, str | No
         (["restrictive covenants", "acuerdos restrictivos"], no_options),
         (["current contractor at any thomson reuters location", "actualmente un contractor"], no_options),
     ]
+    changed += workday_fill_primary_questionnaire(page, select_one_answers)
     for fragments, desired_options in select_one_answers:
         if any(fragment in body.lower() for fragment in fragments):
             for fragment in fragments:
@@ -1887,7 +2139,13 @@ def click_primary_navigation(page, dry_run: bool) -> tuple[str | None, bool]:
 
 def start_workday_application(page, *, prefer_manual: bool = False) -> None:
     accept_cookies(page)
-    if click_text(page, ["Apply"], tags="a, button, [role='button']"):
+    entry_buttons = [
+        "Apply",
+        "Start Your Application",
+        "Start Application",
+        "Get Started",
+    ]
+    if click_text(page, entry_buttons, tags="a, button, [role='button']"):
         page.wait_for_timeout(1500)
     options = ["Apply Manually", "Autofill with Resume"] if prefer_manual else ["Autofill with Resume", "Apply Manually"]
     click_contains(page, options, tags="a, button, [role='button']")
