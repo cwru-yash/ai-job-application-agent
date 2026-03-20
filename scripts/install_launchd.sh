@@ -9,13 +9,25 @@ MINUTE="${SCHEDULE#*:}"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
 PLIST_PATH="${PLIST_DIR}/${LABEL}.plist"
 LOG_DIR="${HOME}/.applypilot/logs"
+RUNNER_DIR="${HOME}/.applypilot/bin"
+RUNNER_PATH="${RUNNER_DIR}/run_daily_launchd.sh"
 
 if [[ ! "${HOUR}" =~ ^[0-9]+$ ]] || [[ ! "${MINUTE}" =~ ^[0-9]+$ ]]; then
   echo "Expected time in HH:MM format, got: ${SCHEDULE}" >&2
   exit 1
 fi
 
-mkdir -p "${PLIST_DIR}" "${LOG_DIR}"
+mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${RUNNER_DIR}"
+
+cat > "${RUNNER_PATH}" <<EOF
+#!/bin/zsh
+set -euo pipefail
+
+cd '${REPO_ROOT}'
+./scripts/run_daily.sh >>'${LOG_DIR}/launchd.out.log' 2>>'${LOG_DIR}/launchd.err.log'
+EOF
+
+chmod +x "${RUNNER_PATH}"
 
 cat > "${PLIST_PATH}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -27,11 +39,12 @@ cat > "${PLIST_PATH}" <<EOF
 
   <key>ProgramArguments</key>
   <array>
-    <string>${REPO_ROOT}/scripts/run_daily.sh</string>
+    <string>/usr/bin/osascript</string>
+    <string>-e</string>
+    <string>tell application "Terminal" to activate</string>
+    <string>-e</string>
+    <string>tell application "Terminal" to do script "/bin/zsh '${RUNNER_PATH}'"</string>
   </array>
-
-  <key>WorkingDirectory</key>
-  <string>${REPO_ROOT}</string>
 
   <key>StartCalendarInterval</key>
   <dict>
@@ -45,8 +58,6 @@ cat > "${PLIST_PATH}" <<EOF
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>PYTHONPATH</key>
-    <string>${REPO_ROOT}/src</string>
   </dict>
 
   <key>StandardOutPath</key>
@@ -62,6 +73,7 @@ launchctl bootstrap "gui/$(id -u)" "${PLIST_PATH}"
 
 echo "Installed ${LABEL} at ${PLIST_PATH}"
 echo "Scheduled for ${HOUR}:${MINUTE}"
+echo "Wrapper: ${RUNNER_PATH}"
 echo
 echo "Run immediately:"
 echo "  launchctl kickstart -k gui/$(id -u)/${LABEL}"

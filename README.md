@@ -235,11 +235,11 @@ APPLYPILOT_DAILY_APPLY_LIMIT=5 ./scripts/run_daily.sh
 
 ## Schedule Daily On macOS
 
-Install a `launchd` job that runs every day at 9:00 AM:
+Install a `launchd` job that runs every day at 12:00 PM local time:
 
 ```bash
 cd /Users/yashm/Documents/ai-job-application-agent
-./scripts/install_launchd.sh 09:00
+./scripts/install_launchd.sh 12:00
 ```
 
 Useful commands:
@@ -258,8 +258,9 @@ Logs land in:
 
 How `launchd` works here:
 - `launchd` does not understand your job pipeline itself.
-- It simply starts `scripts/run_daily.sh` at the scheduled time.
+- It schedules a tiny wrapper under `~/.applypilot/bin/` that opens Terminal and runs `scripts/run_daily.sh`.
 - That script runs `scripts/daily_concurrent.py`, which does the orchestration.
+- This Terminal-backed launch is intentional. On macOS, background agents often cannot read repos under `~/Documents`, while Terminal can because it runs with your normal interactive permissions.
 - The daily supervisor now uses two loops at the same time:
 - prep loop: `discover/enrich/score/tailor/cover/pdf`
 - apply loop: applies ready jobs in batches
