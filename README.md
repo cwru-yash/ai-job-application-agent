@@ -255,6 +255,41 @@ Logs land in:
 ~/.applypilot/logs/
 ```
 
+How `launchd` works here:
+- `launchd` does not understand your job pipeline itself.
+- It simply starts `scripts/run_daily.sh` at the scheduled time.
+- That script runs `scripts/daily_orchestrator.py`, which does the orchestration.
+- The orchestrator is cycle-based, not fully parallel by stage:
+- In each cycle it runs bounded pipeline work first (`discover/enrich/score/tailor/cover`).
+- Then it runs an apply batch against jobs that are already ready.
+- Then it repeats the cycle until the submission target, cycle limit, or idle-stop condition is reached.
+- So yes, in practice one cycle can apply jobs that were already ready while later cycles keep tailoring/scoring other jobs.
+- No, it does not literally tailor one job and apply a different job at the exact same moment inside one single worker process.
+- With `APPLYPILOT_DAILY_WORKERS=1`, apply itself is single-browser-worker. If you raise workers later, apply can parallelize across multiple ready jobs.
+
+## OpenClaw Wrappers
+
+If you want OpenClaw on top, use it as a thin command runner over this repo.
+
+Wrapper commands:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+zsh ./scripts/openclaw_run_daily.sh
+zsh ./scripts/openclaw_status.sh
+zsh ./scripts/openclaw_dry_run.sh 'https://example.com/job'
+```
+
+What these do:
+- `openclaw_run_daily.sh`: runs the full daily orchestrator
+- `openclaw_status.sh`: prints pipeline status
+- `openclaw_dry_run.sh`: dry-runs one specific application without submitting
+
+Recommended OpenClaw usage:
+- Let OpenClaw call these scripts through its exec/cron features.
+- Keep the real logic here in this repo.
+- That way Terminal, `launchd`, and OpenClaw all share the same runtime path and config.
+
 ## Local Command Backend
 
 The fork includes [`scripts/local_apply_agent.py`](scripts/local_apply_agent.py), a local Playwright-based apply agent that lets the
