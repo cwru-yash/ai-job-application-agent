@@ -139,6 +139,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
         FROM jobs
         WHERE fit_score >= 7
           AND tailored_resume_path IS NOT NULL
+          AND application_url IS NOT NULL
           AND applied_at IS NULL
           AND (apply_status IS NULL OR apply_status NOT IN ('applied', 'in_progress'))
         ORDER BY fit_score DESC, tailored_at DESC
