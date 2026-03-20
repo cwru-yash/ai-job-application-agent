@@ -9,6 +9,7 @@ MINUTE="${SCHEDULE#*:}"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
 PLIST_PATH="${PLIST_DIR}/${LABEL}.plist"
 LOG_DIR="${HOME}/.applypilot/logs"
+ARCHIVE_DIR="${LOG_DIR}/archive"
 RUNNER_DIR="${HOME}/.applypilot/bin"
 RUNNER_PATH="${RUNNER_DIR}/run_daily_launchd.sh"
 
@@ -17,14 +18,33 @@ if [[ ! "${HOUR}" =~ ^[0-9]+$ ]] || [[ ! "${MINUTE}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${RUNNER_DIR}"
+mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${ARCHIVE_DIR}" "${RUNNER_DIR}"
 
 cat > "${RUNNER_PATH}" <<EOF
 #!/bin/zsh
 set -euo pipefail
 
+LOG_DIR='${LOG_DIR}'
+ARCHIVE_DIR='${ARCHIVE_DIR}'
+OUT_LOG="\${LOG_DIR}/launchd.out.log"
+ERR_LOG="\${LOG_DIR}/launchd.err.log"
+TIMESTAMP="\$(date '+%Y%m%d_%H%M%S')"
+
+mkdir -p "\${LOG_DIR}" "\${ARCHIVE_DIR}"
+
+if [[ -f "\${OUT_LOG}" ]]; then
+  mv "\${OUT_LOG}" "\${ARCHIVE_DIR}/launchd.out.\${TIMESTAMP}.log"
+fi
+
+if [[ -f "\${ERR_LOG}" ]]; then
+  mv "\${ERR_LOG}" "\${ARCHIVE_DIR}/launchd.err.\${TIMESTAMP}.log"
+fi
+
+: > "\${OUT_LOG}"
+: > "\${ERR_LOG}"
+
 cd '${REPO_ROOT}'
-./scripts/run_daily.sh >>'${LOG_DIR}/launchd.out.log' 2>>'${LOG_DIR}/launchd.err.log'
+./scripts/run_daily.sh >>"\${OUT_LOG}" 2>>"\${ERR_LOG}"
 EOF
 
 chmod +x "${RUNNER_PATH}"

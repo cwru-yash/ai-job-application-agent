@@ -256,6 +256,12 @@ Logs land in:
 ~/.applypilot/logs/
 ```
 
+At the start of each scheduled run, the previous launcher logs are archived to:
+
+```bash
+~/.applypilot/logs/archive/
+```
+
 How `launchd` works here:
 - `launchd` does not understand your job pipeline itself.
 - It schedules a tiny wrapper under `~/.applypilot/bin/` that opens Terminal and runs `scripts/run_daily.sh`.
