@@ -231,6 +231,20 @@ def mark_result(url: str, status: str, error: str | None = None,
     conn.commit()
 
 
+def mark_dry_run_result(url: str, note: str = "dry_run_ready",
+                        duration_ms: int | None = None,
+                        task_id: str | None = None) -> None:
+    """Release a dry-run job without marking it applied or failed."""
+    conn = get_connection()
+    conn.execute("""
+        UPDATE jobs SET apply_status = NULL, apply_error = ?,
+                       agent_id = NULL, apply_duration_ms = ?,
+                       apply_task_id = ?
+        WHERE url = ?
+    """, (note, duration_ms, task_id, url))
+    conn.commit()
+
+
 def release_lock(url: str) -> None:
     """Release the in_progress lock without changing status."""
     conn = get_connection()
@@ -426,10 +440,13 @@ def run_job(
 
         for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
             if f"RESULT:{result_status}" in output:
+                status_value = result_status.lower()
+                if result_status == "APPLIED" and dry_run:
+                    status_value = "dry_run_applied"
                 add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
-                update_state(worker_id, status=result_status.lower(),
+                update_state(worker_id, status=status_value,
                              last_action=f"{result_status} ({elapsed}s)")
-                return result_status.lower(), duration_ms
+                return status_value, duration_ms
 
         if "RESULT:FAILED" in output:
             for out_line in output.split("\n"):
@@ -572,6 +589,11 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             if result == "skipped":
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
+                continue
+            elif result == "dry_run_applied":
+                mark_dry_run_result(job["url"], duration_ms=duration_ms)
+                add_event(f"[W{worker_id}] Dry run OK ({duration_ms // 1000}s): {job['title'][:30]}")
+                update_state(worker_id, status="dry-run", last_action="dry run validated")
                 continue
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
