@@ -23,6 +23,13 @@ from applypilot.database import get_connection
 console = Console()
 
 
+def _format_timestamp(value: str | None) -> str:
+    if not value:
+        return "—"
+    normalized = value.replace("T", " ").replace("Z", "")
+    return normalized.split("+")[0]
+
+
 def generate_dashboard(output_path: str | None = None) -> str:
     """Generate an HTML dashboard of all jobs with fit scores.
 
@@ -38,7 +45,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
     # Stats
     total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    ready = conn.execute(
+    enriched = conn.execute(
         "SELECT COUNT(*) FROM jobs "
         "WHERE full_description IS NOT NULL AND application_url IS NOT NULL"
     ).fetchone()[0]
@@ -47,6 +54,19 @@ def generate_dashboard(output_path: str | None = None) -> str:
     ).fetchone()[0]
     high_fit = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= 7"
+    ).fetchone()[0]
+    ready_to_apply = conn.execute(
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE fit_score >= 7 "
+        "AND tailored_resume_path IS NOT NULL "
+        "AND applied_at IS NULL "
+        "AND (apply_status IS NULL OR apply_status NOT IN ('applied', 'in_progress'))"
+    ).fetchone()[0]
+    applied_total = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
+    ).fetchone()[0]
+    apply_errors = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'failed'"
     ).fetchone()[0]
 
     # Score distribution
@@ -70,6 +90,59 @@ def generate_dashboard(output_path: str | None = None) -> str:
                SUM(CASE WHEN fit_score IS NULL THEN 1 ELSE 0 END) as unscored,
                ROUND(AVG(fit_score), 1) as avg_score
         FROM jobs GROUP BY site ORDER BY high_fit DESC, total DESC
+    """).fetchall()
+
+    daily_activity = conn.execute("""
+        WITH events AS (
+            SELECT substr(discovered_at, 1, 10) AS day, 1 AS discovered, 0 AS enriched, 0 AS scored, 0 AS tailored, 0 AS cover_letters, 0 AS applied
+            FROM jobs WHERE discovered_at IS NOT NULL
+            UNION ALL
+            SELECT substr(detail_scraped_at, 1, 10), 0, 1, 0, 0, 0, 0
+            FROM jobs WHERE detail_scraped_at IS NOT NULL
+            UNION ALL
+            SELECT substr(scored_at, 1, 10), 0, 0, 1, 0, 0, 0
+            FROM jobs WHERE scored_at IS NOT NULL
+            UNION ALL
+            SELECT substr(tailored_at, 1, 10), 0, 0, 0, 1, 0, 0
+            FROM jobs WHERE tailored_at IS NOT NULL
+            UNION ALL
+            SELECT substr(cover_letter_at, 1, 10), 0, 0, 0, 0, 1, 0
+            FROM jobs WHERE cover_letter_at IS NOT NULL
+            UNION ALL
+            SELECT substr(applied_at, 1, 10), 0, 0, 0, 0, 0, 1
+            FROM jobs WHERE applied_at IS NOT NULL
+        )
+        SELECT day,
+               SUM(discovered) AS discovered,
+               SUM(enriched) AS enriched,
+               SUM(scored) AS scored,
+               SUM(tailored) AS tailored,
+               SUM(cover_letters) AS cover_letters,
+               SUM(applied) AS applied
+        FROM events
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT 14
+    """).fetchall()
+
+    recent_apply_rows = conn.execute("""
+        SELECT title, site, location, salary, fit_score, application_url, url,
+               apply_status, apply_error, applied_at, last_attempted_at
+        FROM jobs
+        WHERE apply_status IS NOT NULL OR applied_at IS NOT NULL
+        ORDER BY COALESCE(applied_at, last_attempted_at) DESC
+        LIMIT 50
+    """).fetchall()
+
+    ready_rows = conn.execute("""
+        SELECT title, site, location, salary, fit_score, application_url, url, tailored_at
+        FROM jobs
+        WHERE fit_score >= 7
+          AND tailored_resume_path IS NOT NULL
+          AND applied_at IS NULL
+          AND (apply_status IS NULL OR apply_status NOT IN ('applied', 'in_progress'))
+        ORDER BY fit_score DESC, tailored_at DESC
+        LIMIT 50
     """).fetchall()
 
     # All scored jobs (5+), ordered by score desc
@@ -123,6 +196,76 @@ def generate_dashboard(output_path: str | None = None) -> str:
             <div class="bar-fill" style="width:{s['mid_fit']/max(s['total'],1)*100}%;background:{color}66"></div>
           </div>
         </div>"""
+
+    daily_rows_html = ""
+    for row in daily_activity:
+        daily_rows_html += f"""
+        <tr>
+          <td>{escape(row['day'] or '—')}</td>
+          <td>{row['discovered']}</td>
+          <td>{row['enriched']}</td>
+          <td>{row['scored']}</td>
+          <td>{row['tailored']}</td>
+          <td>{row['cover_letters']}</td>
+          <td>{row['applied']}</td>
+        </tr>"""
+    if not daily_rows_html:
+        daily_rows_html = """
+        <tr><td colspan="7" class="empty-cell">No activity recorded yet.</td></tr>"""
+
+    recent_apply_html = ""
+    for row in recent_apply_rows:
+        status = row["apply_status"] or ("applied" if row["applied_at"] else "unknown")
+        badge_class = {
+            "applied": "status-applied",
+            "failed": "status-failed",
+            "in_progress": "status-running",
+        }.get(status, "status-neutral")
+        when = _format_timestamp(row["applied_at"] or row["last_attempted_at"])
+        title = escape(row["title"] or "Untitled")
+        site = escape(row["site"] or "Unknown")
+        location = escape(row["location"] or "—")
+        salary = escape(row["salary"] or "—")
+        error = escape(row["apply_error"] or "—")
+        source_url = escape(row["application_url"] or row["url"] or "")
+        link_html = f'<a href="{source_url}" target="_blank">Open</a>' if source_url else "—"
+        recent_apply_html += f"""
+        <tr>
+          <td>{title}</td>
+          <td>{site}</td>
+          <td>{location}</td>
+          <td>{salary}</td>
+          <td>{row['fit_score'] if row['fit_score'] is not None else '—'}</td>
+          <td><span class="status-pill {badge_class}">{escape(status)}</span></td>
+          <td>{error}</td>
+          <td>{when}</td>
+          <td>{link_html}</td>
+        </tr>"""
+    if not recent_apply_html:
+        recent_apply_html = """
+        <tr><td colspan="9" class="empty-cell">No apply attempts yet.</td></tr>"""
+
+    ready_rows_html = ""
+    for row in ready_rows:
+        title = escape(row["title"] or "Untitled")
+        site = escape(row["site"] or "Unknown")
+        location = escape(row["location"] or "—")
+        salary = escape(row["salary"] or "—")
+        url = escape(row["application_url"] or row["url"] or "")
+        link_html = f'<a href="{url}" target="_blank">Open</a>' if url else "—"
+        ready_rows_html += f"""
+        <tr>
+          <td>{title}</td>
+          <td>{site}</td>
+          <td>{location}</td>
+          <td>{salary}</td>
+          <td>{row['fit_score'] if row['fit_score'] is not None else '—'}</td>
+          <td>{_format_timestamp(row['tailored_at'])}</td>
+          <td>{link_html}</td>
+        </tr>"""
+    if not ready_rows_html:
+        ready_rows_html = """
+        <tr><td colspan="7" class="empty-cell">No ready-to-apply jobs right now.</td></tr>"""
 
     # Job cards grouped by score
     job_sections = ""
@@ -209,13 +352,15 @@ def generate_dashboard(output_path: str | None = None) -> str:
   .subtitle {{ color: #94a3b8; margin-bottom: 2rem; }}
 
   /* Summary cards */
-  .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2.5rem; }}
+  .summary {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 1rem; margin-bottom: 2.5rem; }}
   .stat-card {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; }}
   .stat-num {{ font-size: 2rem; font-weight: 700; }}
   .stat-label {{ color: #94a3b8; font-size: 0.85rem; margin-top: 0.25rem; }}
   .stat-ok .stat-num {{ color: #10b981; }}
   .stat-scored .stat-num {{ color: #60a5fa; }}
   .stat-high .stat-num {{ color: #f59e0b; }}
+  .stat-apply .stat-num {{ color: #38bdf8; }}
+  .stat-error .stat-num {{ color: #f87171; }}
   .stat-total .stat-num {{ color: #e2e8f0; }}
 
   /* Filters */
@@ -245,6 +390,20 @@ def generate_dashboard(output_path: str | None = None) -> str:
   .site-nums {{ color: #94a3b8; font-size: 0.75rem; margin: 0.15rem 0; }}
   .bar-track {{ height: 8px; background: #334155; border-radius: 4px; display: flex; overflow: hidden; }}
   .bar-fill {{ height: 100%; transition: width 0.3s; }}
+
+  .panel-grid {{ display: grid; grid-template-columns: 1.1fr 1fr; gap: 1.5rem; margin-bottom: 2.5rem; }}
+  .panel {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; overflow: hidden; }}
+  .panel h3 {{ font-size: 1rem; margin-bottom: 1rem; color: #94a3b8; }}
+  .data-table {{ width: 100%; border-collapse: collapse; font-size: 0.8rem; }}
+  .data-table th, .data-table td {{ padding: 0.65rem 0.5rem; border-bottom: 1px solid #334155; text-align: left; vertical-align: top; }}
+  .data-table th {{ color: #94a3b8; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }}
+  .data-table tr:hover td {{ background: #0f172a55; }}
+  .empty-cell {{ color: #64748b; text-align: center; padding: 1rem; }}
+  .status-pill {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 0.15rem 0.55rem; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }}
+  .status-applied {{ background: #064e3b; color: #6ee7b7; }}
+  .status-failed {{ background: #7f1d1d; color: #fecaca; }}
+  .status-running {{ background: #1e3a8a; color: #bfdbfe; }}
+  .status-neutral {{ background: #334155; color: #cbd5e1; }}
 
   /* Score group headers */
   .score-header {{ font-size: 1.2rem; font-weight: 600; margin: 2.5rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid; display: flex; align-items: center; gap: 0.75rem; }}
@@ -294,6 +453,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
   @media (max-width: 768px) {{
     .summary {{ grid-template-columns: repeat(2, 1fr); }}
     .score-section {{ grid-template-columns: 1fr; }}
+    .panel-grid {{ grid-template-columns: 1fr; }}
     .job-grid {{ grid-template-columns: 1fr; }}
     body {{ padding: 1rem; }}
   }}
@@ -302,13 +462,15 @@ def generate_dashboard(output_path: str | None = None) -> str:
 <body>
 
 <h1>ApplyPilot Dashboard</h1>
-<p class="subtitle">{total} jobs &middot; {scored} scored &middot; {high_fit} strong matches (7+)</p>
+<p class="subtitle">{total} jobs &middot; {scored} scored &middot; {high_fit} strong matches (7+) &middot; {applied_total} applied</p>
 
 <div class="summary">
   <div class="stat-card stat-total"><div class="stat-num">{total}</div><div class="stat-label">Total Jobs</div></div>
-  <div class="stat-card stat-ok"><div class="stat-num">{ready}</div><div class="stat-label">Ready (desc + URL)</div></div>
+  <div class="stat-card stat-ok"><div class="stat-num">{enriched}</div><div class="stat-label">Enriched (desc + URL)</div></div>
   <div class="stat-card stat-scored"><div class="stat-num">{scored}</div><div class="stat-label">Scored by LLM</div></div>
   <div class="stat-card stat-high"><div class="stat-num">{high_fit}</div><div class="stat-label">Strong Fit (7+)</div></div>
+  <div class="stat-card stat-apply"><div class="stat-num">{ready_to_apply}</div><div class="stat-label">Ready to Apply</div></div>
+  <div class="stat-card stat-error"><div class="stat-num">{applied_total}/{apply_errors}</div><div class="stat-label">Applied / Failed</div></div>
 </div>
 
 <div class="filters">
@@ -330,6 +492,69 @@ def generate_dashboard(output_path: str | None = None) -> str:
     <h3>By Source</h3>
     {site_rows}
   </div>
+</div>
+
+<div class="panel-grid">
+  <div class="panel">
+    <h3>Daily Activity</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Day</th>
+          <th>Discovered</th>
+          <th>Enriched</th>
+          <th>Scored</th>
+          <th>Tailored</th>
+          <th>Cover</th>
+          <th>Applied</th>
+        </tr>
+      </thead>
+      <tbody>
+        {daily_rows_html}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel">
+    <h3>Ready to Apply</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Job</th>
+          <th>Source</th>
+          <th>Location</th>
+          <th>Salary</th>
+          <th>Score</th>
+          <th>Tailored</th>
+          <th>Link</th>
+        </tr>
+      </thead>
+      <tbody>
+        {ready_rows_html}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom: 2.5rem;">
+  <h3>Recent Apply Activity</h3>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Job</th>
+        <th>Source</th>
+        <th>Location</th>
+        <th>Salary</th>
+        <th>Score</th>
+        <th>Status</th>
+        <th>Error</th>
+        <th>When</th>
+        <th>Link</th>
+      </tr>
+    </thead>
+    <tbody>
+      {recent_apply_html}
+    </tbody>
+  </table>
 </div>
 
 <div id="job-count" class="job-count"></div>
