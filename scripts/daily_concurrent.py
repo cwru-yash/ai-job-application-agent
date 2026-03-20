@@ -227,9 +227,13 @@ def main() -> int:
         {
             "submitted_today": final_stats["applied"] - start_applied,
             "target_submissions": target_submissions,
+            "prep_failed": prep_failed.is_set(),
         },
         flush=True,
     )
+    if prep_failed.is_set():
+        print("Daily concurrent run ended with a prep-loop failure.", flush=True)
+        return 1
     return 0
 
 
