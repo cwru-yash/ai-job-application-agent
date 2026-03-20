@@ -247,6 +247,22 @@ cd /Users/yashm/Documents/ai-job-application-agent
 ./scripts/check_applications.sh
 ```
 
+Run the system in true always-on mode:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/reload_always_on.sh
+```
+
+That stops the noon-only batch launcher, starts a detached always-on supervisor immediately, and keeps restarting the concurrent session after each batch completes.
+
+Stop the always-on supervisor:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/stop_always_on.sh
+```
+
 ## Schedule Daily On macOS
 
 Install a `launchd` job that runs every day at 12:00 PM local time:

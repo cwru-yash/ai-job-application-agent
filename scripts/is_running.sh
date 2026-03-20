@@ -1,8 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
-LABEL="com.ai-job-application-agent.daily"
-PATTERN='daily_concurrent.py|run_daily.sh|applypilot\.cli apply|local_apply_agent'
+LABELS=(
+  "com.ai-job-application-agent.daily"
+  "com.ai-job-application-agent.always-on"
+)
+PATTERN='run_always_on.sh|daily_concurrent.py|run_daily.sh|applypilot\.cli apply|local_apply_agent'
 
 matches="$(ps -axo pid,etime,command | grep -E "${PATTERN}" | grep -v grep || true)"
 
@@ -15,4 +18,7 @@ fi
 
 echo "NOT RUNNING"
 echo
-launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | sed -n '1,35p' || true
+for label in "${LABELS[@]}"; do
+  launchctl print "gui/$(id -u)/${label}" 2>/dev/null | sed -n '1,35p' || true
+  echo
+done
