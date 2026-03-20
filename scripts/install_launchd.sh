@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LABEL="com.ai-job-application-agent.daily"
-SCHEDULE="${1:-09:00}"
+SCHEDULE="${1:-12:00}"
 HOUR="${SCHEDULE%:*}"
 MINUTE="${SCHEDULE#*:}"
 PLIST_DIR="${HOME}/Library/LaunchAgents"

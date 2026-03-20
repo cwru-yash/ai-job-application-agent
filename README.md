@@ -250,6 +250,20 @@ launchctl print gui/$(id -u)/com.ai-job-application-agent.daily
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ai-job-application-agent.daily.plist
 ```
 
+After editing `~/.applypilot/.env`, `profile.json`, or `searches.yaml`, the safest way to refresh the scheduled setup is:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/reload_daily.sh
+```
+
+If you want to reload the config and start a fresh run immediately:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/reload_daily.sh --run-now
+```
+
 Logs land in:
 
 ```bash
