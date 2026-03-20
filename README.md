@@ -233,6 +233,20 @@ Override them for a single run:
 APPLYPILOT_DAILY_APPLY_LIMIT=5 ./scripts/run_daily.sh
 ```
 
+Check whether the daily pipeline is currently running:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/is_running.sh
+```
+
+Get a Terminal summary of sourced jobs, daily pipeline activity, ready-to-apply jobs, and recent apply outcomes:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/check_applications.sh
+```
+
 ## Schedule Daily On macOS
 
 Install a `launchd` job that runs every day at 12:00 PM local time:
