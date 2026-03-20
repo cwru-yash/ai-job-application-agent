@@ -27,7 +27,7 @@ mkdir -p "${LOG_DIR}"
   echo "[$(date)] Repo: ${REPO_ROOT}"
   echo "[$(date)] Settings: min_score=${MIN_SCORE} score_limit=${SCORE_LIMIT} tailor_limit=${TAILOR_LIMIT} cover_limit=${COVER_LIMIT} target_submissions=${TARGET_SUBMISSIONS} apply_batch=${APPLY_BATCH} apply_min_score=${APPLY_MIN_SCORE} validation=${VALIDATION_MODE} max_cycles=${MAX_CYCLES} workers=${WORKERS}"
 
-  python3 "${REPO_ROOT}/scripts/daily_orchestrator.py"
+  python3 "${REPO_ROOT}/scripts/daily_concurrent.py"
 
   echo "[$(date)] Final status snapshot"
   python3 -m applypilot.cli status || true

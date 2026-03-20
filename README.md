@@ -203,7 +203,7 @@ cd /Users/yashm/Documents/ai-job-application-agent
 The runner does:
 
 ```bash
-python3 scripts/daily_orchestrator.py
+python3 scripts/daily_concurrent.py
 applypilot status
 ```
 
@@ -222,6 +222,7 @@ Default knobs:
 Why this is better:
 - discovery and enrichment still run daily for fresh jobs
 - scoring, tailoring, and cover-letter generation are budgeted instead of trying to clear the whole backlog
+- prep work and apply work now run in parallel loops during the same daily session
 - the controller loops toward completed submissions rather than firing one big apply burst
 - failed jobs cool down before retry, so fresh ready jobs get priority
 - the run is quieter and more likely to reach the apply stage every day on a smaller local machine
@@ -258,13 +259,11 @@ Logs land in:
 How `launchd` works here:
 - `launchd` does not understand your job pipeline itself.
 - It simply starts `scripts/run_daily.sh` at the scheduled time.
-- That script runs `scripts/daily_orchestrator.py`, which does the orchestration.
-- The orchestrator is cycle-based, not fully parallel by stage:
-- In each cycle it runs bounded pipeline work first (`discover/enrich/score/tailor/cover`).
-- Then it runs an apply batch against jobs that are already ready.
-- Then it repeats the cycle until the submission target, cycle limit, or idle-stop condition is reached.
-- So yes, in practice one cycle can apply jobs that were already ready while later cycles keep tailoring/scoring other jobs.
-- No, it does not literally tailor one job and apply a different job at the exact same moment inside one single worker process.
+- That script runs `scripts/daily_concurrent.py`, which does the orchestration.
+- The daily supervisor now uses two loops at the same time:
+- prep loop: `discover/enrich/score/tailor/cover/pdf`
+- apply loop: applies ready jobs in batches
+- So yes, now it can prepare later jobs while applying already-ready jobs in parallel during the same session.
 - With `APPLYPILOT_DAILY_WORKERS=1`, apply itself is single-browser-worker. If you raise workers later, apply can parallelize across multiple ready jobs.
 
 ## OpenClaw Wrappers
