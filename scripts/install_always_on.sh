@@ -38,7 +38,7 @@ fi
 : > "\${ERR_LOG}"
 
 cd '${REPO_ROOT}'
-./scripts/run_always_on.sh >>"\${OUT_LOG}" 2>>"\${ERR_LOG}"
+./scripts/ensure_always_on.sh >>"\${OUT_LOG}" 2>>"\${ERR_LOG}"
 EOF
 
 chmod +x "${RUNNER_PATH}"

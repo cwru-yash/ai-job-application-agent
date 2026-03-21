@@ -256,6 +256,13 @@ cd /Users/yashm/Documents/ai-job-application-agent
 
 That stops the noon-only batch launcher, starts a detached always-on supervisor immediately, and keeps restarting the concurrent session after each batch completes.
 
+Install login-time auto-start for the always-on supervisor:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/install_always_on.sh
+```
+
 Stop the always-on supervisor:
 
 ```bash
