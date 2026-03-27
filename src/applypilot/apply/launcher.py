@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
+from applypilot.applyability import is_supported_autoapply_job, sort_jobs_for_autoapply
 from applypilot.database import get_connection
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.agent import build_apply_agent, kill_active_agents
@@ -114,6 +115,63 @@ def _retry_allowed(row, now_dt: datetime) -> bool:
     return (now_dt - attempted_dt) >= timedelta(hours=cooldown_hours)
 
 
+def _stale_in_progress_minutes() -> int:
+    raw = (os.environ.get("APPLYPILOT_STALE_IN_PROGRESS_MINUTES") or "").strip()
+    if not raw:
+        return 30
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 30
+
+
+def release_stale_in_progress_locks() -> int:
+    """Convert abandoned in_progress rows back into failed rows.
+
+    These rows block the queue indefinitely after crashes or forced restarts.
+    """
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(minutes=_stale_in_progress_minutes())
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT url, last_attempted_at
+        FROM jobs
+        WHERE apply_status = 'in_progress'
+          AND last_attempted_at IS NOT NULL
+        """
+    ).fetchall()
+
+    released = 0
+    for row in rows:
+        attempted_raw = row["last_attempted_at"]
+        try:
+            attempted_dt = datetime.fromisoformat(attempted_raw)
+        except ValueError:
+            attempted_dt = None
+        if attempted_dt is None:
+            continue
+        if attempted_dt.tzinfo is None:
+            attempted_dt = attempted_dt.replace(tzinfo=timezone.utc)
+        if attempted_dt > cutoff_dt:
+            continue
+        conn.execute(
+            """
+            UPDATE jobs
+            SET apply_status = 'failed',
+                apply_error = 'stale_in_progress',
+                agent_id = NULL
+            WHERE url = ?
+              AND apply_status = 'in_progress'
+            """,
+            (row["url"],),
+        )
+        released += 1
+
+    if released:
+        conn.commit()
+    return released
+
+
 # ---------------------------------------------------------------------------
 # Database operations
 # ---------------------------------------------------------------------------
@@ -138,13 +196,17 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
             row = conn.execute("""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path,
+                       link_check_status
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
+                  AND cover_letter_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
+            if row is not None and not is_supported_autoapply_job(dict(row)):
+                row = None
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
@@ -161,9 +223,10 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             rows = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path,
-                       apply_status, last_attempted_at
+                       apply_status, last_attempted_at, link_check_status, apply_attempts
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
+                  AND cover_letter_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status = 'failed')
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
@@ -172,9 +235,17 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 ORDER BY CASE WHEN apply_status = 'failed' THEN 1 ELSE 0 END,
                          fit_score DESC, url
                 LIMIT 50
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchall()
+            """, [config.get_max_apply_attempts()] + params).fetchall()
             now_dt = datetime.now(timezone.utc)
-            row = next((candidate for candidate in rows if _retry_allowed(candidate, now_dt)), None)
+            prioritized = sort_jobs_for_autoapply([dict(candidate) for candidate in rows])
+            row = next(
+                (
+                    candidate
+                    for candidate in prioritized
+                    if is_supported_autoapply_job(candidate) and _retry_allowed(candidate, now_dt)
+                ),
+                None,
+            )
 
         if row is None:
             conn.rollback()
@@ -664,6 +735,10 @@ def main(limit: int = 1, target_url: str | None = None,
 
     config.ensure_dirs()
     console = Console()
+    released = release_stale_in_progress_locks()
+    if released:
+        console.print(f"[yellow]Released {released} stale in-progress apply lock(s)[/yellow]")
+        add_event(f"Released {released} stale in-progress lock(s)")
 
     if continuous:
         effective_limit = 0

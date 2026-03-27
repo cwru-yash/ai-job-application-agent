@@ -20,6 +20,8 @@ ENV_PATH = APP_DIR / ".env"
 TAILORED_DIR = APP_DIR / "tailored_resumes"
 COVER_LETTER_DIR = APP_DIR / "cover_letters"
 LOG_DIR = APP_DIR / "logs"
+METRICS_DIR = APP_DIR / "metrics"
+SESSION_EVENT_DIR = METRICS_DIR / "session_events"
 
 # Chrome worker isolation
 CHROME_WORKER_DIR = APP_DIR / "chrome-workers"
@@ -100,7 +102,16 @@ def get_chrome_user_data() -> Path:
 
 def ensure_dirs():
     """Create all required directories."""
-    for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR]:
+    for d in [
+        APP_DIR,
+        TAILORED_DIR,
+        COVER_LETTER_DIR,
+        LOG_DIR,
+        METRICS_DIR,
+        SESSION_EVENT_DIR,
+        CHROME_WORKER_DIR,
+        APPLY_WORKER_DIR,
+    ]:
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -182,6 +193,17 @@ DEFAULTS = {
     "apply_timeout": 300,
     "viewport": "1280x900",
 }
+
+
+def get_max_apply_attempts() -> int:
+    """Return the configured max auto-apply attempts per job."""
+    raw = (os.environ.get("APPLYPILOT_MAX_APPLY_ATTEMPTS") or "").strip()
+    if not raw:
+        return int(DEFAULTS["max_apply_attempts"])
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return int(DEFAULTS["max_apply_attempts"])
 
 
 def load_env():

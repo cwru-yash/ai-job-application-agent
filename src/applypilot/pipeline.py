@@ -35,7 +35,7 @@ console = Console()
 STAGE_ORDER = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 STAGE_META: dict[str, dict] = {
-    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract)"},
+    "discover": {"desc": "Job discovery (JobSpy + Greenhouse + Workday + smart extract)"},
     "enrich":   {"desc": "Detail enrichment (full descriptions + apply URLs)"},
     "score":    {"desc": "LLM scoring (fit 1-10)"},
     "tailor":   {"desc": "Resume tailoring (LLM + validation)"},
@@ -60,8 +60,8 @@ _UPSTREAM: dict[str, str | None] = {
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
+    """Stage: Job discovery — JobSpy, Greenhouse, Workday, and smart-extract scrapers."""
+    stats: dict = {"jobspy": None, "greenhouse": None, "workday": None, "smartextract": None}
 
     # JobSpy
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
@@ -73,6 +73,17 @@ def _run_discover(workers: int = 1) -> dict:
         log.error("JobSpy crawl failed: %s", e)
         console.print(f"  [red]JobSpy error:[/red] {e}")
         stats["jobspy"] = f"error: {e}"
+
+    # Workday corporate scraper
+    console.print("  [cyan]Greenhouse board scraper...[/cyan]")
+    try:
+        from applypilot.discovery.greenhouse import run_greenhouse_discovery
+        run_greenhouse_discovery(workers=workers)
+        stats["greenhouse"] = "ok"
+    except Exception as e:
+        log.error("Greenhouse scraper failed: %s", e)
+        console.print(f"  [red]Greenhouse error:[/red] {e}")
+        stats["greenhouse"] = f"error: {e}"
 
     # Workday corporate scraper
     console.print("  [cyan]Workday corporate scraper...[/cyan]")
@@ -222,7 +233,10 @@ class _StageTracker:
 # SQL to count pending work for each stage
 _PENDING_SQL: dict[str, str] = {
     "enrich": "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL",
-    "score":  "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL",
+    "score":  (
+        "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL "
+        "AND fit_score IS NULL AND COALESCE(link_check_status, '') != 'dead'"
+    ),
     "tailor": (
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
         "AND full_description IS NOT NULL "

@@ -12,6 +12,12 @@ import re
 import time
 from datetime import datetime, timezone
 
+from applypilot.applyability import (
+    expanded_fetch_limit,
+    filter_jobs_for_autoapply,
+    prep_autoapply_only_enabled,
+    sort_jobs_for_autoapply,
+)
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
@@ -25,6 +31,8 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+COVER_JOB_DESC_CHARS = 3000
+COVER_MAX_TOKENS = 700
 
 
 # ── Prompt Builder (profile-driven) ──────────────────────────────────────
@@ -141,7 +149,7 @@ def generate_cover_letter(
         f"TITLE: {job['title']}\n"
         f"COMPANY: {job['site']}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n\n"
-        f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
+        f"DESCRIPTION:\n{(job.get('full_description') or '')[:COVER_JOB_DESC_CHARS]}"
     )
 
     avoid_notes: list[str] = []
@@ -166,7 +174,7 @@ def generate_cover_letter(
             )},
         ]
 
-        letter = client.chat(messages, max_tokens=1024, temperature=0.7)
+        letter = client.chat(messages, max_tokens=COVER_MAX_TOKENS, temperature=0.5)
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
@@ -203,6 +211,9 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     conn = get_connection()
 
     # Fetch jobs that have tailored resumes but no cover letter yet
+    prep_only = prep_autoapply_only_enabled()
+    fetch_limit = expanded_fetch_limit(limit) if prep_only else limit
+
     jobs = conn.execute(
         "SELECT * FROM jobs "
         "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
@@ -210,7 +221,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < ? "
         "ORDER BY fit_score DESC LIMIT ?",
-        (min_score, MAX_ATTEMPTS, limit),
+        (min_score, MAX_ATTEMPTS, fetch_limit),
     ).fetchall()
 
     if not jobs:
@@ -221,6 +232,14 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     if jobs and not isinstance(jobs[0], dict):
         columns = jobs[0].keys()
         jobs = [dict(zip(columns, row)) for row in jobs]
+
+    if prep_only:
+        jobs, skipped = filter_jobs_for_autoapply(jobs)
+        if skipped:
+            log.info("Auto-apply prep mode: skipped %d non-autoapplyable job(s) before cover generation.", skipped)
+        jobs = sort_jobs_for_autoapply(jobs)
+        if limit > 0:
+            jobs = jobs[:limit]
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     log.info(

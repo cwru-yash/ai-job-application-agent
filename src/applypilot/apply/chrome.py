@@ -7,6 +7,7 @@ worker profile setup/cloning, and cross-platform process cleanup.
 import json
 import logging
 import platform
+import socket
 import shutil
 import subprocess
 import threading
@@ -91,6 +92,25 @@ def _kill_on_port(port: int) -> None:
         logger.debug("Port-kill tool not found (netstat/lsof) for port %d", port)
     except Exception:
         logger.debug("Failed to kill process on port %d", port, exc_info=True)
+
+
+def _wait_for_cdp_port(port: int, proc: subprocess.Popen, timeout_s: float = 20.0) -> bool:
+    """Wait for Chrome's remote debugging port to accept TCP connections."""
+    deadline = time.time() + max(1.0, timeout_s)
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        try:
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        except OSError:
+            pass
+        finally:
+            sock.close()
+        time.sleep(0.5)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +265,13 @@ def launch_chrome(worker_id: int, port: int | None = None,
     with _chrome_lock:
         _chrome_procs[worker_id] = proc
 
-    # Give Chrome time to start and open the debug port
-    time.sleep(3)
+    # Wait for the debug port to be reachable before handing control to the agent
+    if not _wait_for_cdp_port(port, proc, timeout_s=20.0):
+        if proc.poll() is None:
+            _kill_process_tree(proc.pid)
+        raise RuntimeError(
+            f"Chrome failed to expose CDP port {port} for worker {worker_id}"
+        )
     logger.info("[worker-%d] Chrome started on port %d (pid %d)",
                 worker_id, port, proc.pid)
     return proc

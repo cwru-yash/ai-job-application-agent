@@ -67,7 +67,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
 
     Schema columns by stage:
       - Discovery:  url, title, salary, description, location, site, strategy, discovered_at
-      - Enrichment: full_description, application_url, detail_scraped_at, detail_error
+      - Enrichment: full_description, application_url, detail_scraped_at, detail_error,
+                   link_check_status, link_checked_at, link_check_error
       - Scoring:    fit_score, score_reasoning, scored_at
       - Tailoring:  tailored_resume_path, tailored_at, tailor_attempts
       - Cover:      cover_letter_path, cover_letter_at, cover_attempts
@@ -104,6 +105,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             application_url       TEXT,
             detail_scraped_at     TEXT,
             detail_error          TEXT,
+            link_check_status     TEXT,
+            link_checked_at       TEXT,
+            link_check_error      TEXT,
 
             -- Scoring stage (job_scorer)
             fit_score             INTEGER,
@@ -158,6 +162,9 @@ _ALL_COLUMNS: dict[str, str] = {
     "application_url": "TEXT",
     "detail_scraped_at": "TEXT",
     "detail_error": "TEXT",
+    "link_check_status": "TEXT",
+    "link_checked_at": "TEXT",
+    "link_check_error": "TEXT",
     # Scoring
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",
@@ -250,7 +257,9 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     # Enrichment stage
     stats["pending_detail"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL"
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE detail_scraped_at IS NULL "
+        "AND COALESCE(link_check_status, '') != 'dead'"
     ).fetchone()[0]
 
     stats["with_description"] = conn.execute(
@@ -261,6 +270,10 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT COUNT(*) FROM jobs WHERE detail_error IS NOT NULL"
     ).fetchone()[0]
 
+    stats["dead_links"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE link_check_status = 'dead'"
+    ).fetchone()[0]
+
     # Scoring stage
     stats["scored"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL"
@@ -268,7 +281,8 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     stats["unscored"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
-        "WHERE full_description IS NOT NULL AND fit_score IS NULL"
+        "WHERE full_description IS NOT NULL AND fit_score IS NULL "
+        "AND COALESCE(link_check_status, '') != 'dead'"
     ).fetchone()[0]
 
     # Score distribution
@@ -312,6 +326,10 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
     ).fetchone()[0]
 
+    stats["failed_jobs_current"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'failed'"
+    ).fetchone()[0]
+
     stats["apply_errors"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL"
     ).fetchone()[0]
@@ -319,8 +337,10 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     stats["ready_to_apply"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
         "WHERE tailored_resume_path IS NOT NULL "
+        "AND cover_letter_path IS NOT NULL "
         "AND applied_at IS NULL "
-        "AND application_url IS NOT NULL"
+        "AND application_url IS NOT NULL "
+        "AND COALESCE(link_check_status, '') != 'dead'"
     ).fetchone()[0]
 
     return stats
@@ -365,6 +385,7 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
                       stage: str = "discovered",
                       min_score: int | None = None,
+                      offset: int = 0,
                       limit: int = 100) -> list[dict]:
     """Fetch jobs filtered by pipeline stage.
 
@@ -372,6 +393,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         conn: Database connection. Uses get_connection() if None.
         stage: One of "discovered", "enriched", "scored", "tailored", "applied".
         min_score: Minimum fit_score filter (only relevant for scored+ stages).
+        offset: Number of matching rows to skip before returning results.
         limit: Maximum number of rows to return.
 
     Returns:
@@ -382,9 +404,12 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
 
     conditions = {
         "discovered": "1=1",
-        "pending_detail": "detail_scraped_at IS NULL",
+        "pending_detail": "detail_scraped_at IS NULL AND COALESCE(link_check_status, '') != 'dead'",
         "enriched": "full_description IS NOT NULL",
-        "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
+        "pending_score": (
+            "full_description IS NOT NULL AND fit_score IS NULL "
+            "AND COALESCE(link_check_status, '') != 'dead'"
+        ),
         "scored": "fit_score IS NOT NULL",
         "pending_tailor": (
             "fit_score >= ? AND full_description IS NOT NULL "
@@ -392,8 +417,10 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         ),
         "tailored": "tailored_resume_path IS NOT NULL",
         "pending_apply": (
-            "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
-            "AND application_url IS NOT NULL"
+            "tailored_resume_path IS NOT NULL AND cover_letter_path IS NOT NULL "
+            "AND applied_at IS NULL "
+            "AND application_url IS NOT NULL "
+            "AND COALESCE(link_check_status, '') != 'dead'"
         ),
         "applied": "applied_at IS NOT NULL",
     }
@@ -414,6 +441,9 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
     if limit > 0:
         query += " LIMIT ?"
         params.append(limit)
+        if offset > 0:
+            query += " OFFSET ?"
+            params.append(offset)
 
     rows = conn.execute(query, params).fetchall()
 

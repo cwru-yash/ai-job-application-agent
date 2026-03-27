@@ -59,15 +59,24 @@ def generate_dashboard(output_path: str | None = None) -> str:
         "SELECT COUNT(*) FROM jobs "
         "WHERE fit_score >= 7 "
         "AND tailored_resume_path IS NOT NULL "
+        "AND cover_letter_path IS NOT NULL "
         "AND applied_at IS NULL "
         "AND (apply_status IS NULL OR apply_status NOT IN ('applied', 'in_progress'))"
     ).fetchone()[0]
     applied_total = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
     ).fetchone()[0]
-    apply_errors = conn.execute(
+    failed_jobs_current = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE apply_status = 'failed'"
     ).fetchone()[0]
+    apply_failure_rows = conn.execute("""
+        SELECT COALESCE(apply_error, 'unknown') AS reason, COUNT(*) AS count
+        FROM jobs
+        WHERE apply_status = 'failed'
+        GROUP BY COALESCE(apply_error, 'unknown')
+        ORDER BY count DESC, reason ASC
+        LIMIT 20
+    """).fetchall()
 
     # Score distribution
     score_dist: dict[int, int] = {}
@@ -139,6 +148,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
         FROM jobs
         WHERE fit_score >= 7
           AND tailored_resume_path IS NOT NULL
+          AND cover_letter_path IS NOT NULL
           AND application_url IS NOT NULL
           AND applied_at IS NULL
           AND (apply_status IS NULL OR apply_status NOT IN ('applied', 'in_progress'))
@@ -245,6 +255,17 @@ def generate_dashboard(output_path: str | None = None) -> str:
     if not recent_apply_html:
         recent_apply_html = """
         <tr><td colspan="9" class="empty-cell">No apply attempts yet.</td></tr>"""
+
+    failure_reason_html = ""
+    for row in apply_failure_rows:
+        failure_reason_html += f"""
+        <tr>
+          <td>{escape(row['reason'] or 'unknown')}</td>
+          <td>{row['count']}</td>
+        </tr>"""
+    if not failure_reason_html:
+        failure_reason_html = """
+        <tr><td colspan="2" class="empty-cell">No failed jobs right now.</td></tr>"""
 
     ready_rows_html = ""
     for row in ready_rows:
@@ -471,7 +492,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
   <div class="stat-card stat-scored"><div class="stat-num">{scored}</div><div class="stat-label">Scored by LLM</div></div>
   <div class="stat-card stat-high"><div class="stat-num">{high_fit}</div><div class="stat-label">Strong Fit (7+)</div></div>
   <div class="stat-card stat-apply"><div class="stat-num">{ready_to_apply}</div><div class="stat-label">Ready to Apply</div></div>
-  <div class="stat-card stat-error"><div class="stat-num">{applied_total}/{apply_errors}</div><div class="stat-label">Applied / Failed</div></div>
+  <div class="stat-card stat-error"><div class="stat-num">{applied_total}/{failed_jobs_current}</div><div class="stat-label">Applied / Currently Failed</div></div>
 </div>
 
 <div class="filters">
@@ -547,13 +568,28 @@ def generate_dashboard(output_path: str | None = None) -> str:
         <th>Salary</th>
         <th>Score</th>
         <th>Status</th>
-        <th>Error</th>
+        <th>Failure Reason</th>
         <th>When</th>
         <th>Link</th>
       </tr>
     </thead>
     <tbody>
       {recent_apply_html}
+    </tbody>
+  </table>
+</div>
+
+<div class="panel" style="margin-bottom: 2.5rem;">
+  <h3>Failed Jobs by Reason</h3>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Failure Reason</th>
+        <th>Jobs</th>
+      </tr>
+    </thead>
+    <tbody>
+      {failure_reason_html}
     </tbody>
   </table>
 </div>

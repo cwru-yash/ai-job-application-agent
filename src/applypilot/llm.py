@@ -64,7 +64,14 @@ def _detect_provider() -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 
 _MAX_RETRIES = 5
-_TIMEOUT = 120  # seconds
+def _timeout_seconds() -> float:
+    raw = (os.environ.get("LLM_TIMEOUT") or "").strip()
+    if not raw:
+        return 120.0
+    try:
+        return max(30.0, float(raw))
+    except ValueError:
+        return 120.0
 
 # Base wait on first 429/503 (doubles each retry, caps at 60s).
 # Gemini free tier is 15 RPM = 4s minimum between requests; 10s gives headroom.
@@ -88,7 +95,7 @@ class LLMClient:
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
-        self._client = httpx.Client(timeout=_TIMEOUT)
+        self._client = httpx.Client(timeout=_timeout_seconds())
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)

@@ -125,10 +125,11 @@ Auto-apply backend selection also lives here:
 - `APPLYPILOT_APPLY_BACKEND=claude` uses Claude Code (default)
 - `APPLYPILOT_APPLY_BACKEND=command` runs `APPLYPILOT_AGENT_COMMAND`
 - `APPLYPILOT_AGENT_COMMAND` supports `{model}`, `{mcp_config}`, `{worker_dir}`, `{port}`, `{worker_id}`
-- `scripts/local_apply_agent.py` is a local browser-driving agent for Workday-style flows
+- `scripts/local_apply_agent.py` is a local browser-driving agent for Workday and Greenhouse flows
 - `APPLYPILOT_ACCOUNT_PASSWORD` can be scoped with `APPLYPILOT_ACCOUNT_PASSWORD_HOSTS`
 - `APPLYPILOT_ACCOUNT_PASSWORDS_FILE` supports per-host passwords without putting them in git
 - `APPLYPILOT_IMAP_*` enables mailbox polling for password-reset and verification emails
+- `~/.applypilot/question_memory/` stores per-company ATS question memory learned from successful and diagnostic runs
 
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)
@@ -155,7 +156,7 @@ Generates a custom resume per job: reorders experience, emphasizes relevant skil
 Writes a targeted cover letter per job referencing the specific company, role, and how your experience maps to their requirements.
 
 ### Auto-Apply
-The Claude backend launches Chrome plus the Playwright MCP stack. The local command backend can drive Workday-style flows directly with Playwright, fill personal information and work history, upload the tailored resume and cover letter, handle account bootstrap, and submit when the form flow is stable. A live dashboard shows progress in real-time.
+The Claude backend launches Chrome plus the Playwright MCP stack. The local command backend can drive Workday and Greenhouse flows directly with Playwright, fill personal information and work history, upload the tailored resume and cover letter, handle account bootstrap, use mailbox verification flows when needed, and submit when the form flow is stable. A live dashboard shows progress in real-time.
 
 The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
 
@@ -188,6 +189,8 @@ applypilot apply --continuous           # Run forever, polling for new jobs
 applypilot apply --headless             # Headless browser mode
 applypilot apply --url URL              # Apply to a specific job
 applypilot status                       # Pipeline statistics
+applypilot report --section all         # Structured runtime + pipeline report
+applypilot report --section ready --format markdown
 applypilot dashboard                    # Open HTML results dashboard
 ```
 
@@ -247,6 +250,22 @@ cd /Users/yashm/Documents/ai-job-application-agent
 ./scripts/check_applications.sh
 ```
 
+Open the numbered local control menu:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/job_agent_menu.sh
+```
+
+Emit structured reports for automation, OpenClaw, or shell scripting:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+PYTHONPATH=src python3 -m applypilot.cli report --section all --format json
+PYTHONPATH=src python3 -m applypilot.cli report --section runtime --format table
+PYTHONPATH=src python3 -m applypilot.cli report --section ready --format markdown
+```
+
 Run the system in true always-on mode:
 
 ```bash
@@ -268,6 +287,16 @@ Stop the always-on supervisor:
 ```bash
 cd /Users/yashm/Documents/ai-job-application-agent
 ./scripts/stop_always_on.sh
+```
+
+Inspect learned ATS/company question memory:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/show_question_memory.sh --list
+./scripts/show_question_memory.sh --ats greenhouse --list
+./scripts/show_question_memory.sh "Grafana Labs"
+./scripts/show_question_memory.sh "Thomson Reuters" --ats workday
 ```
 
 ## Schedule Daily On macOS
@@ -332,20 +361,54 @@ Wrapper commands:
 
 ```bash
 cd /Users/yashm/Documents/ai-job-application-agent
-zsh ./scripts/openclaw_run_daily.sh
 zsh ./scripts/openclaw_status.sh
-zsh ./scripts/openclaw_dry_run.sh 'https://example.com/job'
+zsh ./scripts/openclaw_activity.sh
+zsh ./scripts/openclaw_jobs.sh ready
+zsh ./scripts/openclaw_control.sh reload-always-on
 ```
 
 What these do:
-- `openclaw_run_daily.sh`: runs the full daily orchestrator
-- `openclaw_status.sh`: prints pipeline status
-- `openclaw_dry_run.sh`: dry-runs one specific application without submitting
+- `openclaw_status.sh`: prints runtime, overview, queue, failures, config, and history in Markdown
+- `openclaw_activity.sh`: prints daily activity plus recent session events in Markdown
+- `openclaw_jobs.sh`: prints ready jobs, recent apply activity, or failure lists in Markdown
+- `openclaw_control.sh`: runs runtime controls and returns compact Markdown/text
 
 Recommended OpenClaw usage:
-- Let OpenClaw call these scripts through its exec/cron features.
-- Keep the real logic here in this repo.
-- That way Terminal, `launchd`, and OpenClaw all share the same runtime path and config.
+- Register this repo's skills into OpenClaw:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/install_openclaw_integration.sh
+```
+
+- Then start a new OpenClaw session and use:
+  - `openclaw dashboard`
+  - `/skill job-agent-help`
+  - `/skill job-agent-status`
+  - `/skill job-agent-activity`
+  - `/skill job-agent-jobs ready`
+  - `/skill job-agent-control reload-always-on`
+- The repo-owned skills live under `openclaw_skills/` and are registered through `skills.load.extraDirs` in `~/.openclaw/openclaw.json`.
+- Terminal, `launchd`, and OpenClaw all share the same runtime path and config.
+
+## Metrics and History
+
+Structured session events are written to:
+
+```bash
+~/.applypilot/metrics/session_events/YYYY-MM-DD.jsonl
+```
+
+Event types include:
+- `supervisor_started`
+- `startup_delay`
+- `wake_detected`
+- `session_started`
+- `session_finished`
+- `session_failed`
+- `control_action`
+
+Use `applypilot report --section history` or `./scripts/openclaw_activity.sh` to inspect the recent ledger.
 
 ## Local Command Backend
 
@@ -355,11 +418,13 @@ The fork includes [`scripts/local_apply_agent.py`](scripts/local_apply_agent.py)
 - a remote Ollama server via `OLLAMA_HOST` or `--base-url`
 - a remote OpenAI-compatible endpoint via `--provider openai`
 
-The local agent now controls the browser for Workday-style flows and supports:
+The local agent now controls the browser for Workday and Greenhouse flows and supports:
 - account sign-in
 - account creation
 - password-reset fallback
 - optional IMAP polling for reset / verification emails
+- Greenhouse verification-code retrieval over IMAP
+- per-company ATS question memory and reuse
 - dry-run and live-submit result reporting back into ApplyPilot
 
 Recommended small model for local development on low-memory machines:
@@ -416,6 +481,34 @@ If different Workday tenants use different passwords, store them locally:
 ```
 
 Save that as `~/.applypilot/account_passwords.json`, or point `APPLYPILOT_ACCOUNT_PASSWORDS_FILE` at another JSON file.
+
+### Question Memory
+
+The local agent keeps ATS-specific company memory under:
+
+```bash
+~/.applypilot/question_memory/
+```
+
+Current structure:
+
+- `greenhouse/<Company>.json`
+- `workday/<Company>.json`
+
+Each file stores:
+- `questions`: reusable learned answers the agent can apply automatically later
+- `seen_questions`: questions encountered on prior runs, with optional suggested answers for review
+
+This memory is loaded after explicit host/company overrides and before global defaults, so curated overrides still win.
+
+Quick inspection commands:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+./scripts/show_question_memory.sh --list
+./scripts/show_question_memory.sh --ats workday --list
+./scripts/show_question_memory.sh "Ōura" --ats greenhouse
+```
 
 ---
 

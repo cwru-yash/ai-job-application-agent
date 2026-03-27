@@ -1,0 +1,81 @@
+{
+  "defaults": [
+    {
+      "match_any": [
+        "how did you hear about us",
+        "source"
+      ],
+      "answer": "LinkedIn"
+    },
+    {
+      "match_any": [
+        "legally authorized to work",
+        "authorized to work in the country",
+        "authorized to legally work",
+        "authorized to work in the job location",
+        "work authorization"
+      ],
+      "answer": "Yes"
+    },
+    {
+      "match_any": [
+        "require sponsorship",
+        "require visa sponsorship",
+        "sponsorship to legally work",
+        "sponsorship to work in the job location",
+        "require sponsorship for employment visa status",
+        "visa support"
+      ],
+      "answer": "No"
+    },
+    {
+      "match_any": [
+        "previously worked for",
+        "have previously worked for",
+        "worked for any of",
+        "subsidiaries in the past"
+      ],
+      "answer": "No"
+    }
+  ],
+  "companies": {
+    "Thomson Reuters": [
+      {
+        "match_any": [
+          "restrictive covenants",
+          "non compete",
+          "confidentiality agreements",
+          "contractual obligations"
+        ],
+        "answer": "No"
+      },
+      {
+        "match_any": [
+          "current contractor at any thomson reuters location",
+          "currently working for",
+          "independent, vendor, or temporary worker"
+        ],
+        "answer": "No"
+      }
+    ],
+    "Adobe": [
+      {
+        "match_any": [
+          "how did you hear about us",
+          "source"
+        ],
+        "answer": "LinkedIn"
+      }
+    ],
+    "Netflix": [
+      {
+        "match_any": [
+          "how did you hear about us",
+          "source"
+        ],
+        "answer": "LinkedIn"
+      }
+    ]
+  },
+  "hosts": {}
+}

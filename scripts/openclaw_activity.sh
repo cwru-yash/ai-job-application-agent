@@ -7,4 +7,6 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PA
 export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 cd "${REPO_ROOT}"
-exec python3 -m applypilot.cli report --section all --format markdown --days 14 --limit 10
+python3 -m applypilot.cli report --section activity --format markdown --days 14 --limit 14
+printf '\n\n'
+python3 -m applypilot.cli report --section history --format markdown --days 14 --limit 20

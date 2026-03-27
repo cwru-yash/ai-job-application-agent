@@ -22,6 +22,16 @@ MAX_CYCLES="${APPLYPILOT_DAILY_MAX_CYCLES:-6}"
 
 mkdir -p "${LOG_DIR}"
 
+python3 "${REPO_ROOT}/scripts/log_session_event.py" \
+  control_action \
+  --mode daily_batch \
+  --pid $$ \
+  --log-path "${LOG_FILE}" \
+  --message "run_daily.sh invoked" \
+  --field action=run_daily \
+  --field max_cycles="${MAX_CYCLES}" \
+  --field target_submissions="${TARGET_SUBMISSIONS}" >/dev/null 2>&1 || true
+
 {
   echo "[$(date)] Starting daily pipeline"
   echo "[$(date)] Repo: ${REPO_ROOT}"
@@ -32,5 +42,13 @@ mkdir -p "${LOG_DIR}"
   echo "[$(date)] Final status snapshot"
   python3 -m applypilot.cli status || true
 } 2>&1 | tee -a "${LOG_FILE}"
+
+python3 "${REPO_ROOT}/scripts/log_session_event.py" \
+  control_action \
+  --mode daily_batch \
+  --pid $$ \
+  --log-path "${LOG_FILE}" \
+  --message "run_daily.sh completed" \
+  --field action=run_daily_completed >/dev/null 2>&1 || true
 
 exit 0

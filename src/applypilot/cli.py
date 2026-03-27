@@ -27,6 +27,19 @@ log = logging.getLogger(__name__)
 
 # Valid pipeline stages (in execution order)
 VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
+VALID_REPORT_SECTIONS = (
+    "overview",
+    "runtime",
+    "activity",
+    "sources",
+    "ready",
+    "recent",
+    "failures",
+    "config",
+    "history",
+    "all",
+)
+VALID_REPORT_FORMATS = ("json", "table", "markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -227,12 +240,17 @@ def apply(
     if not (gen and url):
         conn = get_connection()
         ready = conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL"
+            "SELECT COUNT(*) FROM jobs "
+            "WHERE tailored_resume_path IS NOT NULL "
+            "AND cover_letter_path IS NOT NULL "
+            "AND applied_at IS NULL "
+            "AND application_url IS NOT NULL "
+            "AND COALESCE(link_check_status, '') != 'dead'"
         ).fetchone()[0]
         if ready == 0:
             console.print(
-                "[red]No tailored resumes ready.[/red]\n"
-                "Run [bold]applypilot run score tailor[/bold] first to prepare applications."
+                "[red]No tailored resume + cover letter pairs ready.[/red]\n"
+                "Run [bold]applypilot run score tailor cover[/bold] first to prepare applications."
             )
             raise typer.Exit(code=1)
 
@@ -300,10 +318,11 @@ def apply(
 def status() -> None:
     """Show pipeline statistics from the database."""
     _bootstrap()
+    from applypilot.reporting import build_report
 
-    from applypilot.database import get_stats
-
-    stats = get_stats()
+    report = build_report(section="all", days=14, limit=20)
+    stats = report["overview"]
+    by_site = report["source_breakdown"]
 
     console.print("\n[bold]ApplyPilot Pipeline Status[/bold]\n")
 
@@ -312,18 +331,24 @@ def status() -> None:
     summary.add_column("Metric", style="bold")
     summary.add_column("Count", justify="right")
 
-    summary.add_row("Total jobs discovered", str(stats["total"]))
-    summary.add_row("With full description", str(stats["with_description"]))
-    summary.add_row("Pending enrichment", str(stats["pending_detail"]))
-    summary.add_row("Enrichment errors", str(stats["detail_errors"]))
+    summary.add_row("Total jobs discovered", str(stats["jobs_sourced"]))
+    summary.add_row("With full description", str(stats["descriptions_extracted"]))
+    summary.add_row("Pending enrichment", str(stats["pending_enrichment"]))
+    summary.add_row("Enrichment errors", str(stats["enrichment_errors"]))
+    summary.add_row("Dead links skipped", str(stats.get("dead_links", 0)))
     summary.add_row("Scored by LLM", str(stats["scored"]))
-    summary.add_row("Pending scoring", str(stats["unscored"]))
-    summary.add_row("Tailored resumes", str(stats["tailored"]))
-    summary.add_row("Pending tailoring (7+)", str(stats["untailored_eligible"]))
-    summary.add_row("Cover letters", str(stats["with_cover_letter"]))
-    summary.add_row("Ready to apply", str(stats["ready_to_apply"]))
+    summary.add_row("Pending scoring", str(stats["pending_scoring"]))
+    summary.add_row("Tailored resumes", str(stats["tailored_resumes"]))
+    summary.add_row("Pending tailoring (7+)", str(stats["pending_tailoring"]))
+    summary.add_row("Cover letters", str(stats["cover_letters"]))
+    summary.add_row("Ready to apply", str(stats["ready_queue"]))
     summary.add_row("Applied", str(stats["applied"]))
-    summary.add_row("Apply errors", str(stats["apply_errors"]))
+    summary.add_row("Currently failed jobs", str(stats["failed_jobs_current"]))
+
+    failure_reasons = stats.get("failed_job_reasons", [])
+    if failure_reasons:
+        top_reasons = ", ".join(f"{row['reason']} ({row['count']})" for row in failure_reasons[:3])
+        summary.add_row("Top failure reasons", top_reasons)
 
     console.print(summary)
 
@@ -334,8 +359,10 @@ def status() -> None:
         dist_table.add_column("Count", justify="right")
         dist_table.add_column("Bar")
 
-        max_count = max(count for _, count in stats["score_distribution"]) or 1
-        for score, count in stats["score_distribution"]:
+        max_count = max(row["count"] for row in stats["score_distribution"]) or 1
+        for row in stats["score_distribution"]:
+            score = row["score"]
+            count = row["count"]
             bar_len = int(count / max_count * 30)
             if score >= 7:
                 color = "green"
@@ -349,17 +376,50 @@ def status() -> None:
         console.print(dist_table)
 
     # By site
-    if stats["by_site"]:
+    if by_site:
         site_table = Table(title="\nJobs by Source", show_header=True, header_style="bold magenta")
         site_table.add_column("Site")
         site_table.add_column("Count", justify="right")
 
-        for site, count in stats["by_site"]:
-            site_table.add_row(site or "Unknown", str(count))
+        for row in by_site:
+            site_table.add_row((row["site"] or "Unknown"), str(row["total"]))
 
         console.print(site_table)
 
     console.print()
+
+
+@app.command()
+def report(
+    section: str = typer.Option(
+        "all",
+        "--section",
+        help=f"Report section. One of: {', '.join(VALID_REPORT_SECTIONS)}.",
+    ),
+    output_format: str = typer.Option(
+        "table",
+        "--format",
+        help=f"Output format. One of: {', '.join(VALID_REPORT_FORMATS)}.",
+    ),
+    days: int = typer.Option(14, "--days", help="Number of trailing days for activity/history views."),
+    limit: int = typer.Option(20, "--limit", help="Row limit for queue/history/failure views."),
+) -> None:
+    """Emit structured or human-friendly pipeline, runtime, and history reports."""
+    _bootstrap()
+
+    if section not in VALID_REPORT_SECTIONS:
+        console.print(f"[red]Invalid --section:[/red] {section}")
+        raise typer.Exit(code=1)
+
+    if output_format not in VALID_REPORT_FORMATS:
+        console.print(f"[red]Invalid --format:[/red] {output_format}")
+        raise typer.Exit(code=1)
+
+    from applypilot.reporting import build_report, render_report
+
+    report_payload = build_report(section=section, days=days, limit=limit)
+    rendered = render_report(report_payload, section=section, output_format=output_format)
+    print(rendered)
 
 
 @app.command()

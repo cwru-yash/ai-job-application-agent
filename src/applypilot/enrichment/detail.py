@@ -25,6 +25,7 @@ from playwright.sync_api import sync_playwright
 from applypilot import config
 from applypilot.config import DB_PATH
 from applypilot.database import get_connection, init_db, ensure_columns
+from applypilot.linkcheck import check_url, dead_page_reason
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -528,6 +529,92 @@ RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 PERMANENT_FAILURES = {404, 410, 451}
 
 
+def _record_link_check(
+    conn: sqlite3.Connection,
+    *,
+    url: str,
+    status: str,
+    reason: str,
+    checked_at: str,
+    mark_dead: bool,
+) -> None:
+    if mark_dead:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET link_check_status = ?, link_checked_at = ?, link_check_error = ?,
+                detail_error = ?, detail_scraped_at = ?
+            WHERE url = ?
+            """,
+            (status, checked_at, reason, f"link_dead:{reason}", checked_at, url),
+        )
+        return
+
+    conn.execute(
+        """
+        UPDATE jobs
+        SET link_check_status = ?, link_checked_at = ?, link_check_error = ?
+        WHERE url = ?
+        """,
+        (status, checked_at, None if status == "alive" else reason, url),
+    )
+
+
+def _precheck_jobs(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, str, str]],
+    *,
+    workers: int = 8,
+) -> tuple[list[tuple[str, str, str]], dict[str, int]]:
+    """Cheap URL health pass before the expensive browser scraper."""
+    if not rows:
+        return [], {"alive": 0, "uncertain": 0, "dead": 0}
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+    stats = {"alive": 0, "uncertain": 0, "dead": 0}
+    survivors: list[tuple[str, str, str]] = []
+
+    def _check(row: tuple[str, str, str]) -> tuple[tuple[str, str, str], dict]:
+        url, title, site = row
+        return row, check_url(url)
+
+    with ThreadPoolExecutor(max_workers=min(max(1, workers), len(rows))) as pool:
+        futures = [pool.submit(_check, row) for row in rows]
+        for future in as_completed(futures):
+            row, result = future.result()
+            url, _title, _site = row
+            status = str(result.get("status") or "uncertain")
+            reason = str(result.get("reason") or "unknown")
+            if status == "dead":
+                stats["dead"] += 1
+                _record_link_check(
+                    conn,
+                    url=url,
+                    status=status,
+                    reason=reason,
+                    checked_at=checked_at,
+                    mark_dead=True,
+                )
+                continue
+
+            if status == "alive":
+                stats["alive"] += 1
+            else:
+                stats["uncertain"] += 1
+            _record_link_check(
+                conn,
+                url=url,
+                status=status,
+                reason=reason,
+                checked_at=checked_at,
+                mark_dead=False,
+            )
+            survivors.append(row)
+
+    conn.commit()
+    return survivors, stats
+
+
 def scrape_detail_page(page, url: str) -> dict:
     """Full cascade for one detail page."""
     result: dict = {
@@ -556,6 +643,21 @@ def scrape_detail_page(page, url: str) -> dict:
             result["error"] = "timeout"
         else:
             result["error"] = err_str[:200]
+        result["elapsed"] = time.time() - t0
+        return result
+
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+    try:
+        body_text = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        body_text = ""
+
+    dead_reason = dead_page_reason(f"{page.url}\n{title}\n{body_text}")
+    if dead_reason:
+        result["error"] = f"browser_dead:{dead_reason}"
         result["elapsed"] = time.time() - t0
         return result
 
@@ -708,6 +810,12 @@ def _run_detail_scraper(
         f"SELECT url, title, site FROM jobs {where} ORDER BY site"
     ).fetchall()
 
+    rows, link_stats = _precheck_jobs(conn, rows, workers=max(1, workers * 2))
+    log.info(
+        "Link precheck: %d alive, %d uncertain, %d dead",
+        link_stats["alive"], link_stats["uncertain"], link_stats["dead"],
+    )
+
     if not rows:
         log.info("No pending jobs to scrape.")
         return {"processed": 0, "ok": 0, "partial": 0, "error": 0}
@@ -822,6 +930,11 @@ def stream_detail(
             ).fetchall()
 
             if rows:
+                rows, link_stats = _precheck_jobs(conn, rows, workers=8)
+                log.info(
+                    "Link precheck: %d alive, %d uncertain, %d dead",
+                    link_stats["alive"], link_stats["uncertain"], link_stats["dead"],
+                )
                 site_jobs: dict[str, list[tuple]] = {}
                 for row in rows:
                     url, title, site = row[0], row[1], row[2]

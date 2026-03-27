@@ -17,6 +17,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from applypilot.applyability import (
+    expanded_fetch_limit,
+    filter_jobs_for_autoapply,
+    prep_autoapply_only_enabled,
+    sort_jobs_for_autoapply,
+)
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
@@ -31,6 +37,8 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+TAILOR_JOB_DESC_CHARS = 3500
+TAILOR_MAX_TOKENS = 1400
 
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
@@ -374,7 +382,7 @@ def tailor_resume(
         f"TITLE: {job['title']}\n"
         f"COMPANY: {job['site']}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n\n"
-        f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
+        f"DESCRIPTION:\n{(job.get('full_description') or '')[:TAILOR_JOB_DESC_CHARS]}"
     )
 
     report: dict = {
@@ -401,7 +409,7 @@ def tailor_resume(
             {"role": "user", "content": f"ORIGINAL RESUME:\n{resume_text}\n\n---\n\nTARGET JOB:\n{job_text}\n\nReturn the JSON:"},
         ]
 
-        raw = client.chat(messages, max_tokens=2048, temperature=0.4)
+        raw = client.chat(messages, max_tokens=TAILOR_MAX_TOKENS, temperature=0.3)
 
         # Parse JSON from response
         try:
@@ -472,7 +480,17 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
-    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
+    prep_only = prep_autoapply_only_enabled()
+    fetch_limit = expanded_fetch_limit(limit) if prep_only else limit
+    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=fetch_limit)
+
+    if prep_only:
+        jobs, skipped = filter_jobs_for_autoapply(jobs)
+        if skipped:
+            log.info("Auto-apply prep mode: skipped %d non-autoapplyable job(s) before tailoring.", skipped)
+        jobs = sort_jobs_for_autoapply(jobs)
+        if limit > 0:
+            jobs = jobs[:limit]
 
     if not jobs:
         log.info("No untailored jobs with score >= %d.", min_score)

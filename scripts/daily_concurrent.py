@@ -30,6 +30,7 @@ def main() -> int:
 
     from applypilot.config import ensure_dirs, load_env
     from applypilot.database import get_stats, init_db
+    from applypilot.events import record_event
 
     load_env()
     ensure_dirs()
@@ -52,6 +53,7 @@ def main() -> int:
     prep_sleep_seconds = max(0, env_int("APPLYPILOT_DAILY_SLEEP_SECONDS", 10))
     apply_poll_seconds = max(5, env_int("APPLYPILOT_DAILY_APPLY_POLL_SECONDS", 20))
     idle_break_limit = max(1, env_int("APPLYPILOT_DAILY_IDLE_BREAK_LIMIT", 2))
+    session_id = f"daily-concurrent-{int(time.time())}"
 
     remaining_score_budget = int(base_settings["score_limit"])
     remaining_tailor_budget = int(base_settings["tailor_limit"])
@@ -75,6 +77,21 @@ def main() -> int:
             "idle_break_limit": idle_break_limit,
         },
         flush=True,
+    )
+    record_event(
+        "session_started",
+        mode="daily_concurrent",
+        pid=os.getpid(),
+        session_id=session_id,
+        message="daily concurrent session started",
+        extra={
+            "target_submissions": target_submissions,
+            "max_cycles": max_cycles,
+            "apply_batch": apply_batch,
+            "apply_min_score": apply_min_score,
+            "workers": workers,
+            "headless": headless,
+        },
     )
 
     stop_event = threading.Event()
@@ -233,7 +250,29 @@ def main() -> int:
     )
     if prep_failed.is_set():
         print("Daily concurrent run ended with a prep-loop failure.", flush=True)
+        record_event(
+            "session_failed",
+            mode="daily_concurrent",
+            pid=os.getpid(),
+            session_id=session_id,
+            message="daily concurrent session failed",
+            extra={
+                "target_submissions": target_submissions,
+                "submitted_today": final_stats["applied"] - start_applied,
+            },
+        )
         return 1
+    record_event(
+        "session_finished",
+        mode="daily_concurrent",
+        pid=os.getpid(),
+        session_id=session_id,
+        message="daily concurrent session finished",
+        extra={
+            "target_submissions": target_submissions,
+            "submitted_today": final_stats["applied"] - start_applied,
+        },
+    )
     return 0
 
 

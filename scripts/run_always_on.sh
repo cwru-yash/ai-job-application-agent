@@ -3,6 +3,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${HOME}/.applypilot/logs"
+PID_FILE="${HOME}/.applypilot/run_always_on.pid"
+LOCK_DIR="${HOME}/.applypilot/run_always_on.lock"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 LOG_FILE="${LOG_DIR}/always_on_${TIMESTAMP}.log"
 
@@ -16,9 +18,52 @@ WAKE_GRACE_SECONDS="${APPLYPILOT_ALWAYS_ON_WAKE_GRACE_SECONDS:-300}"
 WAKE_POLL_SECONDS="${APPLYPILOT_ALWAYS_ON_WAKE_POLL_SECONDS:-15}"
 
 mkdir -p "${LOG_DIR}"
+SUPERVISOR_SESSION_ID="always-on-${TIMESTAMP}-$$"
+
+acquire_lock() {
+  if mkdir "${LOCK_DIR}" 2>/dev/null; then
+    echo $$ > "${LOCK_DIR}/pid"
+    echo $$ > "${PID_FILE}"
+    return 0
+  fi
+
+  local existing_pid=""
+  if [[ -f "${LOCK_DIR}/pid" ]]; then
+    existing_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+  elif [[ -f "${PID_FILE}" ]]; then
+    existing_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  fi
+
+  if [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" >/dev/null 2>&1; then
+    echo "[$(date)] Another always-on supervisor is already running (pid ${existing_pid}); exiting."
+    exit 0
+  fi
+
+  rm -rf "${LOCK_DIR}" >/dev/null 2>&1 || true
+  mkdir "${LOCK_DIR}"
+  echo $$ > "${LOCK_DIR}/pid"
+  echo $$ > "${PID_FILE}"
+}
+
+acquire_lock
+
+cleanup_pid_file() {
+  if [[ -f "${PID_FILE}" ]] && [[ "$(cat "${PID_FILE}" 2>/dev/null || true)" == "$$" ]]; then
+    rm -f "${PID_FILE}"
+  fi
+  if [[ -f "${LOCK_DIR}/pid" ]] && [[ "$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "${LOCK_DIR}"
+  fi
+}
+
+trap cleanup_pid_file EXIT INT TERM
 
 iteration=0
 last_handled_wake_epoch=""
+
+log_event_async() {
+  python3 "${REPO_ROOT}/scripts/log_session_event.py" "$@" >/dev/null 2>&1 &!
+}
 
 parse_mac_epoch() {
   local stamp="${1:-}"
@@ -53,6 +98,14 @@ wait_for_recent_wake() {
   remaining=$((WAKE_GRACE_SECONDS - (now - wake_epoch)))
   if (( remaining > 0 )); then
     echo "[$(date)] Detected recent wake (${reason}); waiting ${remaining}s before continuing"
+    log_event_async \
+      wake_detected \
+      --mode always_on \
+      --pid $$ \
+      --session-id "${SUPERVISOR_SESSION_ID}" \
+      --log-path "${LOG_FILE}" \
+      --message "wake detected (${reason})" \
+      --field wait_seconds="${remaining}"
     sleep "${remaining}"
   fi
   last_handled_wake_epoch="${wake_epoch}"
@@ -66,8 +119,25 @@ wait_for_recent_wake() {
   echo "[$(date)] Startup delay seconds: ${STARTUP_DELAY_SECONDS}"
   echo "[$(date)] Wake grace seconds: ${WAKE_GRACE_SECONDS}"
   echo "[$(date)] Wake poll seconds: ${WAKE_POLL_SECONDS}"
+  log_event_async \
+    supervisor_started \
+    --mode always_on \
+    --pid $$ \
+    --session-id "${SUPERVISOR_SESSION_ID}" \
+    --log-path "${LOG_FILE}" \
+    --message "always-on supervisor started" \
+    --field startup_delay_seconds="${STARTUP_DELAY_SECONDS}" \
+    --field wake_grace_seconds="${WAKE_GRACE_SECONDS}"
 
   echo "[$(date)] Initial startup delay ${STARTUP_DELAY_SECONDS}s"
+  log_event_async \
+    startup_delay \
+    --mode always_on \
+    --pid $$ \
+    --session-id "${SUPERVISOR_SESSION_ID}" \
+    --log-path "${LOG_FILE}" \
+    --message "initial startup delay" \
+    --field delay_seconds="${STARTUP_DELAY_SECONDS}"
   sleep "${STARTUP_DELAY_SECONDS}"
   wait_for_recent_wake "startup"
 
@@ -90,6 +160,14 @@ wait_for_recent_wake() {
       if [[ -n "${wake_epoch}" ]] && (( wake_epoch > session_start_epoch )); then
         if [[ -z "${last_handled_wake_epoch}" ]] || (( wake_epoch > last_handled_wake_epoch )); then
           echo "[$(date)] Wake detected during active session; stopping child ${child_pid} and entering grace period"
+          log_event_async \
+            wake_detected \
+            --mode always_on \
+            --pid $$ \
+            --session-id "${SUPERVISOR_SESSION_ID}" \
+            --log-path "${LOG_FILE}" \
+            --message "wake detected during active session" \
+            --field child_pid="${child_pid}"
           kill "${child_pid}" >/dev/null 2>&1 || true
           set +e
           wait "${child_pid}"

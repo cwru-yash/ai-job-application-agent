@@ -37,8 +37,10 @@ def run_stage(label: str, fn: Callable[[], object]) -> object:
 
 
 def load_daily_pipeline_settings() -> dict[str, object]:
+    discover_enabled = env_flag("APPLYPILOT_DAILY_DISCOVER", True)
     return {
-        "discover_enabled": env_flag("APPLYPILOT_DAILY_DISCOVER", True),
+        "discover_enabled": discover_enabled,
+        "greenhouse_discover_enabled": env_flag("APPLYPILOT_DAILY_GREENHOUSE_DISCOVER", discover_enabled),
         "enrich_enabled": env_flag("APPLYPILOT_DAILY_ENRICH", True),
         "score_limit": env_int("APPLYPILOT_DAILY_SCORE_LIMIT", 90),
         "tailor_limit": env_int("APPLYPILOT_DAILY_TAILOR_LIMIT", 35),
@@ -58,6 +60,7 @@ def run_daily_pipeline_once(
     from applypilot.config import ensure_dirs, load_env
     from applypilot.database import get_stats, init_db
     from applypilot.discovery.jobspy import run_discovery
+    from applypilot.discovery.greenhouse import run_greenhouse_discovery
     from applypilot.discovery.workday import run_workday_discovery
     from applypilot.discovery.smartextract import run_smart_extract
     from applypilot.enrichment.detail import run_enrichment
@@ -75,6 +78,7 @@ def run_daily_pipeline_once(
         resolved.update(settings)
 
     discover_enabled = bool(resolved["discover_enabled"])
+    greenhouse_discover_enabled = bool(resolved.get("greenhouse_discover_enabled", discover_enabled))
     enrich_enabled = bool(resolved["enrich_enabled"])
     score_limit = int(resolved["score_limit"])
     tailor_limit = int(resolved["tailor_limit"])
@@ -94,6 +98,11 @@ def run_daily_pipeline_once(
         run_stage("discover: smartextract", lambda: run_smart_extract(workers=discover_workers))
     else:
         print("\n=== discover skipped ===", flush=True)
+
+    if greenhouse_discover_enabled:
+        run_stage("discover: greenhouse", lambda: run_greenhouse_discovery(workers=discover_workers))
+    else:
+        print("\n=== discover: greenhouse skipped ===", flush=True)
 
     if enrich_enabled:
         run_stage("enrich", lambda: run_enrichment(workers=enrich_workers))
