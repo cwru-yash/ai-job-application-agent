@@ -68,6 +68,7 @@ def run_daily_pipeline_once(
     from applypilot.scoring.pdf import batch_convert
     from applypilot.scoring.scorer import run_scoring
     from applypilot.scoring.tailor import run_tailoring
+    from applypilot.view import refresh_dashboard_safely
 
     load_env()
     ensure_dirs()
@@ -135,6 +136,7 @@ def run_daily_pipeline_once(
     print("\nFinal stats:", flush=True)
     stats = get_stats()
     print(stats, flush=True)
+    refresh_dashboard_safely()
     return stats
 
 

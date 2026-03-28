@@ -156,7 +156,7 @@ Generates a custom resume per job: reorders experience, emphasizes relevant skil
 Writes a targeted cover letter per job referencing the specific company, role, and how your experience maps to their requirements.
 
 ### Auto-Apply
-The Claude backend launches Chrome plus the Playwright MCP stack. The local command backend can drive Workday and Greenhouse flows directly with Playwright, fill personal information and work history, upload the tailored resume and cover letter, handle account bootstrap, use mailbox verification flows when needed, and submit when the form flow is stable. A live dashboard shows progress in real-time.
+The Claude backend launches Chrome plus the Playwright MCP stack. The local command backend can drive Workday and Greenhouse flows directly with Playwright, fill personal information and work history, upload the tailored resume and cover letter, handle account bootstrap, use mailbox verification flows when needed, and submit when the form flow is stable. A live dashboard shows progress in real-time, and the HTML dashboard now refreshes automatically after prep and apply runs.
 
 The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
 
@@ -194,6 +194,14 @@ applypilot report --section ready --format markdown
 applypilot dashboard                    # Open HTML results dashboard
 ```
 
+The HTML dashboard is written to `~/.applypilot/dashboard.html`. It is regenerated automatically by the prep/apply runners, and you can still force a refresh manually with:
+
+```bash
+cd /Users/yashm/Documents/ai-job-application-agent
+PYTHONPATH=src python3 -m applypilot.cli dashboard
+open ~/.applypilot/dashboard.html
+```
+
 ## Run Without Codex
 
 Manual daily run from this repo:
@@ -221,6 +229,9 @@ Default knobs:
 - `APPLYPILOT_DAILY_VALIDATION=lenient`
 - `APPLYPILOT_DAILY_WORKERS=1`
 - `APPLYPILOT_APPLY_RETRY_COOLDOWN_HOURS=18`
+- `APPLYPILOT_SUPPORTED_AUTOAPPLY_PATTERNS=myworkdayjobs.com,greenhouse.io,...`
+- `APPLYPILOT_PREP_PREFERRED_SITES=greenhouse.io,BMO,RBC,Cisco,...`
+- `APPLYPILOT_PREP_DEPRIORITIZE_SITES=Netflix,Adobe,Thomson Reuters,Moderna`
 
 Why this is better:
 - discovery and enrichment still run daily for fresh jobs
@@ -228,6 +239,7 @@ Why this is better:
 - prep work and apply work now run in parallel loops during the same daily session
 - the controller loops toward completed submissions rather than firing one big apply burst
 - failed jobs cool down before retry, so fresh ready jobs get priority
+- Greenhouse and other easier supported ATS targets can be preferred ahead of sticky tenants via env hints
 - the run is quieter and more likely to reach the apply stage every day on a smaller local machine
 
 Override them for a single run:
@@ -425,7 +437,16 @@ The local agent now controls the browser for Workday and Greenhouse flows and su
 - optional IMAP polling for reset / verification emails
 - Greenhouse verification-code retrieval over IMAP
 - per-company ATS question memory and reuse
+- command-backend silence timeouts so stuck agent runs fail fast instead of hanging forever
+- ATS-aware prep/apply prioritization so easier supported targets can stay ahead of noisier tenants
 - dry-run and live-submit result reporting back into ApplyPilot
+
+Useful runtime tuning:
+- `APPLYPILOT_AGENT_TIMEOUT`
+- `APPLYPILOT_AGENT_SILENCE_TIMEOUT`
+- `APPLYPILOT_SUPPORTED_AUTOAPPLY_PATTERNS`
+- `APPLYPILOT_PREP_PREFERRED_SITES`
+- `APPLYPILOT_PREP_DEPRIORITIZE_SITES`
 
 Recommended small model for local development on low-memory machines:
 - `qwen3:4b` for the best instruction-following / agent tradeoff

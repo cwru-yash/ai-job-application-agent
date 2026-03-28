@@ -106,6 +106,19 @@ def get_apply_agent_timeout() -> int:
         return _DEFAULT_TIMEOUT
 
 
+def get_apply_agent_silence_timeout(total_timeout: int | None = None) -> int:
+    """Resolve the maximum allowed silent period for an agent process."""
+    raw = (os.environ.get("APPLYPILOT_AGENT_SILENCE_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            return max(15, int(raw))
+        except ValueError:
+            pass
+    if total_timeout is None:
+        total_timeout = get_apply_agent_timeout()
+    return max(30, min(90, total_timeout))
+
+
 def kill_active_agents() -> None:
     """Kill all active agent processes."""
     with _agent_lock:
@@ -205,28 +218,70 @@ def _handle_structured_line(
     return False
 
 
-def _collect_process_output(
+def _start_output_collector(
     proc: subprocess.Popen,
     worker_log: Path,
     on_action: ActionCallback | None,
-) -> tuple[list[str], dict[str, Any]]:
+) -> tuple[list[str], dict[str, Any], threading.Event, threading.Thread, dict[str, float]]:
     text_parts: list[str] = []
     stats: dict[str, Any] = {}
+    done = threading.Event()
+    last_output = {"ts": time.time()}
 
     if proc.stdout is None:
-        return text_parts, stats
+        done.set()
+        thread = threading.Thread(target=lambda: None, daemon=True)
+        return text_parts, stats, done, thread, last_output
 
-    with open(worker_log, "a", encoding="utf-8") as log_file:
-        for raw_line in proc.stdout:
-            line = raw_line.strip()
-            if not line:
-                continue
-            if _handle_structured_line(line, text_parts, log_file, on_action, stats):
-                continue
-            text_parts.append(line)
-            log_file.write(line + "\n")
+    def _reader() -> None:
+        try:
+            with open(worker_log, "a", encoding="utf-8") as log_file:
+                for raw_line in proc.stdout:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    last_output["ts"] = time.time()
+                    if _handle_structured_line(line, text_parts, log_file, on_action, stats):
+                        continue
+                    text_parts.append(line)
+                    log_file.write(line + "\n")
+        finally:
+            done.set()
 
-    return text_parts, stats
+    thread = threading.Thread(target=_reader, daemon=True, name=f"apply-agent-reader-{proc.pid}")
+    thread.start()
+    return text_parts, stats, done, thread, last_output
+
+
+def _wait_for_agent_process(
+    proc: subprocess.Popen,
+    *,
+    timeout: int,
+    silence_timeout: int,
+    worker_log: Path,
+    reader_done: threading.Event,
+    reader_thread: threading.Thread,
+    last_output: dict[str, float],
+) -> None:
+    start = time.time()
+    while True:
+        if proc.poll() is not None:
+            reader_done.wait(timeout=2)
+            reader_thread.join(timeout=1)
+            return
+
+        now = time.time()
+        if timeout and now - start >= timeout:
+            with open(worker_log, "a", encoding="utf-8") as log_file:
+                log_file.write(f"ACTION: agent timeout after {timeout}s\n")
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+
+        if silence_timeout and now - last_output["ts"] >= silence_timeout:
+            with open(worker_log, "a", encoding="utf-8") as log_file:
+                log_file.write(f"ACTION: agent silence timeout after {silence_timeout}s\n")
+            raise subprocess.TimeoutExpired(proc.args, silence_timeout)
+
+        time.sleep(0.5)
 
 
 class ClaudeCodeAgent(ApplyAgent):
@@ -236,6 +291,7 @@ class ClaudeCodeAgent(ApplyAgent):
 
     def __init__(self, timeout: int = _DEFAULT_TIMEOUT):
         self.timeout = timeout
+        self.silence_timeout = get_apply_agent_silence_timeout(timeout)
 
     def run(
         self,
@@ -301,8 +357,18 @@ class ClaudeCodeAgent(ApplyAgent):
             proc.stdin.write(prompt)
             proc.stdin.close()
 
-            text_parts, stats = _collect_process_output(proc, worker_log, on_action)
-            proc.wait(timeout=self.timeout)
+            text_parts, stats, reader_done, reader_thread, last_output = _start_output_collector(
+                proc, worker_log, on_action
+            )
+            _wait_for_agent_process(
+                proc,
+                timeout=self.timeout,
+                silence_timeout=self.silence_timeout,
+                worker_log=worker_log,
+                reader_done=reader_done,
+                reader_thread=reader_thread,
+                last_output=last_output,
+            )
             return AgentRunResult(
                 output="\n".join(text_parts),
                 duration_ms=int((time.time() - start) * 1000),
@@ -324,6 +390,7 @@ class CommandApplyAgent(ApplyAgent):
     def __init__(self, command: str, timeout: int = _DEFAULT_TIMEOUT):
         self.command = command
         self.timeout = timeout
+        self.silence_timeout = get_apply_agent_silence_timeout(timeout)
 
     def _build_command(
         self,
@@ -394,8 +461,18 @@ class CommandApplyAgent(ApplyAgent):
             proc.stdin.write(prompt)
             proc.stdin.close()
 
-            text_parts, stats = _collect_process_output(proc, worker_log, on_action)
-            proc.wait(timeout=self.timeout)
+            text_parts, stats, reader_done, reader_thread, last_output = _start_output_collector(
+                proc, worker_log, on_action
+            )
+            _wait_for_agent_process(
+                proc,
+                timeout=self.timeout,
+                silence_timeout=self.silence_timeout,
+                worker_log=worker_log,
+                reader_done=reader_done,
+                reader_thread=reader_thread,
+                last_output=last_output,
+            )
             return AgentRunResult(
                 output="\n".join(text_parts),
                 duration_ms=int((time.time() - start) * 1000),

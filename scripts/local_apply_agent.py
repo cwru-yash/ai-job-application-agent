@@ -2315,12 +2315,34 @@ def greenhouse_select_like(field: dict[str, Any]) -> bool:
     class_name = str(field.get("class_name") or "").lower()
     placeholder = str(field.get("placeholder") or "").lower()
     label = str(field.get("label") or "").lower()
+    name = str(field.get("name") or field.get("id") or "").lower()
+    selectish_labels = (
+        "country",
+        "time zone",
+        "timezone",
+        "which of the following",
+        "best describes you",
+        "eligible to work",
+        "authorized to work",
+        "based and plan to work from the us",
+        "sponsorship",
+        "require sponsorship",
+        "how did you hear",
+        "source",
+        "veteran",
+        "disability",
+        "gender",
+        "race",
+        "ethnicity",
+    )
     return (
         field.get("tag") == "select"
         or field.get("role") == "combobox"
         or "select__input" in class_name
         or placeholder == "select..."
         or label.endswith("*") and "select" in placeholder
+        or any(fragment in label for fragment in selectish_labels)
+        or any(fragment in name for fragment in ("country", "timezone", "sponsorship", "eligib", "source"))
     )
 
 
@@ -2358,11 +2380,61 @@ def greenhouse_select_committed(locator, desired: str) -> bool:
         return True
     return False
 
+
+def greenhouse_value_variants(field: dict[str, Any], value: Any) -> list[str]:
+    raw = normalize_space(str(value))
+    if not raw:
+        return []
+    variants: list[str] = []
+
+    def add(item: str) -> None:
+        clean = normalize_space(item)
+        if clean and clean not in variants:
+            variants.append(clean)
+
+    add(raw)
+    label = normalize_space(str(field.get("label") or field.get("name") or "")).lower()
+    normalized = normalize_override_key(raw)
+
+    if "country" in label:
+        if normalized in {"united states", "usa", "us", "united states of america"}:
+            add("United States")
+            add("United States of America")
+            add("USA")
+            add("US")
+        if normalized in {"canada", "ca"}:
+            add("Canada")
+
+    if any(term in label for term in ("eligible to work", "authorized to work", "based and plan to work from the us", "sponsorship")):
+        if normalized in {"yes", "true"}:
+            add("Yes")
+            add("Y")
+            add("True")
+        if normalized in {"no", "false"}:
+            add("No")
+            add("N")
+            add("False")
+
+    if any(term in label for term in ("which of the following", "best describes you")):
+        if "individual contributor" in normalized:
+            add("Individual Contributor")
+            add("IC")
+
+    if any(term in label for term in ("time zone", "timezone")):
+        if "eastern" in normalized or "new york" in normalized:
+            add("Eastern Time")
+            add("Eastern Standard Time")
+            add("US Eastern")
+            add("United States / Eastern Time")
+
+    return variants
+
 def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any) -> bool:
     desired = normalize_space(str(value))
     label = normalize_space(str(field.get("label") or field.get("name") or "")).lower()
     if not desired:
         return False
+    desired_variants = greenhouse_value_variants(field, value)
     try:
         locator.scroll_into_view_if_needed(timeout=3000)
     except Exception:
@@ -2377,27 +2449,30 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
     except Exception:
         pass
     try:
-        locator.type(desired, delay=20, timeout=5000)
+        locator.type(desired_variants[0], delay=20, timeout=5000)
         page.wait_for_timeout(700)
     except Exception:
         try:
-            locator.fill(desired, timeout=5000)
+            locator.fill(desired_variants[0], timeout=5000)
             page.wait_for_timeout(700)
         except Exception:
             return False
-    if choose_text_option(page, [desired], allow_first_visible=True):
-        if greenhouse_select_committed(locator, desired):
-            return True
-    try:
-        locator.press("Tab")
-        page.wait_for_timeout(500)
-        if greenhouse_select_committed(locator, desired):
-            return True
-    except Exception:
-        pass
+    if choose_text_option(page, desired_variants, allow_first_visible=True):
+        for candidate in desired_variants:
+            if greenhouse_select_committed(locator, candidate):
+                return True
+    for candidate in desired_variants:
+        try:
+            locator.fill(candidate, timeout=4000)
+            locator.press("Tab")
+            page.wait_for_timeout(500)
+            if greenhouse_select_committed(locator, candidate):
+                return True
+        except Exception:
+            continue
     if any(term in label for term in ("location", "city")):
         try:
-            locator.fill(desired, timeout=4000)
+            locator.fill(desired_variants[0], timeout=4000)
             locator.press("Tab")
             page.wait_for_timeout(500)
             current = normalize_space(locator.input_value(timeout=1000))
@@ -2410,29 +2485,34 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
                 el.value = value;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-            }""", desired)
+            }""", desired_variants[0])
             page.wait_for_timeout(300)
             current = normalize_space(locator.input_value(timeout=1000))
             if current:
                 return True
         except Exception:
             pass
-    try:
-        locator.press("ArrowDown")
-        locator.press("Enter")
-        page.wait_for_timeout(700)
-        if greenhouse_select_committed(locator, desired):
-            return True
-    except Exception:
+    for candidate in desired_variants:
         try:
-            page.keyboard.press("ArrowDown")
-            page.keyboard.press("Enter")
+            locator.fill(candidate, timeout=4000)
+        except Exception:
+            pass
+        try:
+            locator.press("ArrowDown")
+            locator.press("Enter")
             page.wait_for_timeout(700)
-            if greenhouse_select_committed(locator, desired):
+            if greenhouse_select_committed(locator, candidate):
                 return True
         except Exception:
-            return False
-    return greenhouse_select_committed(locator, desired)
+            try:
+                page.keyboard.press("ArrowDown")
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(700)
+                if greenhouse_select_committed(locator, candidate):
+                    return True
+            except Exception:
+                continue
+    return any(greenhouse_select_committed(locator, candidate) for candidate in desired_variants)
 
 
 def fill_field(page, field: dict[str, Any], value: Any) -> bool:

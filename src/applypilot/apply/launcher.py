@@ -856,3 +856,9 @@ def main(limit: int = 1, target_url: str | None = None,
         _stop_event.set()
         kill_active_agents()
         kill_all_chrome()
+        try:
+            from applypilot.view import refresh_dashboard_safely
+
+            refresh_dashboard_safely()
+        except Exception:
+            logger.exception("Failed to refresh HTML dashboard after apply run")

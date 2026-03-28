@@ -10,6 +10,7 @@ Generates a self-contained HTML dashboard with:
 
 from __future__ import annotations
 
+import logging
 import os
 import webbrowser
 from html import escape
@@ -21,6 +22,7 @@ from applypilot.config import APP_DIR, DB_PATH
 from applypilot.database import get_connection
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def _format_timestamp(value: str | None) -> str:
@@ -666,3 +668,12 @@ def open_dashboard(output_path: str | None = None) -> None:
     path = generate_dashboard(output_path)
     console.print("[dim]Opening in browser...[/dim]")
     webbrowser.open(f"file:///{path}")
+
+
+def refresh_dashboard_safely(output_path: str | None = None) -> str | None:
+    """Best-effort dashboard refresh for background automation paths."""
+    try:
+        return generate_dashboard(output_path)
+    except Exception:
+        logger.exception("Failed to refresh HTML dashboard")
+        return None

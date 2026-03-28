@@ -15,6 +15,7 @@ _DEFAULT_DEPRIORITIZED_SITE_HINTS = (
     "netflix",
     "adobe",
     "thomson reuters",
+    "moderna",
 )
 _DEFAULT_PREFERRED_SITE_HINTS = (
     "greenhouse.io",
@@ -25,7 +26,6 @@ _DEFAULT_PREFERRED_SITE_HINTS = (
     "mastercard",
     "motorola solutions",
     "td bank",
-    "moderna",
     "nvidia",
 )
 
