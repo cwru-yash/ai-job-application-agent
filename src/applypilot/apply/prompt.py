@@ -7,6 +7,7 @@ personal data is loaded from the user's profile -- nothing is hardcoded.
 
 import logging
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,24 @@ from pathlib import Path
 from applypilot import config
 
 logger = logging.getLogger(__name__)
+
+
+def _job_description_for_prompt(job: dict, max_chars: int = 6000) -> str:
+    """Return a bounded job description block for the apply prompt."""
+    raw = str(job.get("full_description") or job.get("description") or "").strip()
+    if not raw:
+        return "Not available."
+
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) <= max_chars:
+        return text
+
+    clipped = text[:max_chars].rsplit("\n", 1)[0].rsplit(". ", 1)[0].strip()
+    if not clipped:
+        clipped = text[:max_chars].strip()
+    return clipped + "\n\n[Job description truncated for apply-time prompting.]"
 
 
 def _build_profile_summary(profile: dict) -> str:
@@ -495,6 +514,8 @@ def build_prompt(job: dict, tailored_resume: str,
     else:
         cl_display = cover_letter_text
 
+    job_description_display = _job_description_for_prompt(job)
+
     # Phone digits only (for fields with country prefix)
     phone_digits = "".join(c for c in personal.get("phone", "") if c.isdigit())
 
@@ -520,6 +541,9 @@ URL: {job.get('application_url') or job['url']}
 Title: {job['title']}
 Company: {job.get('site', 'Unknown')}
 Fit Score: {job.get('fit_score', 'N/A')}/10
+
+== JOB DESCRIPTION (use for qualitative answers) ==
+{job_description_display}
 
 == FILES ==
 Resume PDF (upload this): {pdf_path}

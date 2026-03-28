@@ -64,11 +64,17 @@ def summarize_file(path: Path) -> str:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return f"{path} :: invalid_json"
-    question_count = len(payload.get("questions") or [])
+    questions = payload.get("questions") or []
+    question_count = len(questions)
+    generated_count = sum(1 for item in questions if isinstance(item, dict) and item.get("source") == "llm_generated")
+    manual_count = max(0, question_count - generated_count)
     seen_count = len(payload.get("seen_questions") or [])
     company = payload.get("company") or path.stem
     ats = payload.get("ats") or path.parent.name
-    return f"{path} :: ats={ats} company={company} questions={question_count} seen={seen_count}"
+    return (
+        f"{path} :: ats={ats} company={company} questions={question_count} "
+        f"(manual={manual_count} generated={generated_count}) seen={seen_count}"
+    )
 
 
 def main() -> int:
@@ -84,8 +90,14 @@ def main() -> int:
         return 0
 
     path = files[0]
+    payload = json.loads(path.read_text(encoding="utf-8"))
     print(path)
-    print(json.dumps(json.loads(path.read_text(encoding="utf-8")), indent=2, ensure_ascii=False))
+    questions = payload.get("questions") or []
+    generated_count = sum(1 for item in questions if isinstance(item, dict) and item.get("source") == "llm_generated")
+    manual_count = max(0, len(questions) - generated_count)
+    print(f"ats={payload.get('ats') or path.parent.name} company={payload.get('company') or path.stem}")
+    print(f"questions={len(questions)} manual={manual_count} generated={generated_count} seen={len(payload.get('seen_questions') or [])}")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
 

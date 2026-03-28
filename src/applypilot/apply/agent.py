@@ -95,6 +95,10 @@ def render_command_agent_command(
         raise ValueError(f"Unknown placeholder '{{{name}}}' in apply agent command.") from exc
 
 
+def _is_local_apply_agent_command(cmd: list[str]) -> bool:
+    return any(str(part).endswith("local_apply_agent.py") for part in cmd)
+
+
 def get_apply_agent_timeout() -> int:
     """Resolve the backend process timeout in seconds."""
     raw = (os.environ.get("APPLYPILOT_AGENT_TIMEOUT") or "").strip()
@@ -284,6 +288,51 @@ def _wait_for_agent_process(
         time.sleep(0.5)
 
 
+def _wait_for_logged_agent_process(
+    proc: subprocess.Popen,
+    *,
+    timeout: int,
+    silence_timeout: int,
+    worker_log: Path,
+    start_size: int,
+) -> None:
+    start = time.time()
+    last_output = time.time()
+    last_size = start_size
+    while True:
+        if proc.poll() is not None:
+            return
+
+        try:
+            current_size = worker_log.stat().st_size
+        except FileNotFoundError:
+            current_size = last_size
+        if current_size > last_size:
+            last_size = current_size
+            last_output = time.time()
+
+        now = time.time()
+        if timeout and now - start >= timeout:
+            with open(worker_log, "a", encoding="utf-8") as log_file:
+                log_file.write(f"ACTION: agent timeout after {timeout}s\n")
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+
+        if silence_timeout and now - last_output >= silence_timeout:
+            with open(worker_log, "a", encoding="utf-8") as log_file:
+                log_file.write(f"ACTION: agent silence timeout after {silence_timeout}s\n")
+            raise subprocess.TimeoutExpired(proc.args, silence_timeout)
+
+        time.sleep(0.5)
+
+
+def _read_log_delta(worker_log: Path, start_size: int) -> str:
+    if not worker_log.exists():
+        return ""
+    with open(worker_log, "r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(start_size)
+        return handle.read()
+
+
 class ClaudeCodeAgent(ApplyAgent):
     """Claude Code based apply agent."""
 
@@ -439,12 +488,31 @@ class CommandApplyAgent(ApplyAgent):
         env["APPLYPILOT_MODEL"] = model
         env["APPLYPILOT_WORKER_DIR"] = str(worker_dir)
         env["APPLYPILOT_WORKER_ID"] = str(worker_id)
+        env["PYTHONUNBUFFERED"] = "1"
+
+        use_local_apply_agent = _is_local_apply_agent_command(cmd)
+        use_prompt_file = use_local_apply_agent and "--prompt-file" not in cmd
+        prompt_path = worker_dir / "apply_prompt.txt"
+        if use_prompt_file:
+            prompt_path.write_text(prompt, encoding="utf-8")
+            env["APPLYPILOT_PROMPT_FILE"] = str(prompt_path)
+            cmd = [*cmd, "--prompt-file", str(prompt_path)]
+
+        log_start_size = worker_log.stat().st_size if worker_log.exists() else 0
+        with open(worker_log, "a", encoding="utf-8") as log_file:
+            if use_prompt_file:
+                log_file.write(
+                    f"ACTION: launching command agent with prompt file {prompt_path}\n"
+                )
+            else:
+                log_file.write("ACTION: launching command agent via stdin\n")
 
         start = time.time()
+        child_log_handle = open(worker_log, "a", encoding="utf-8") if use_local_apply_agent else None
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+            stdin=subprocess.DEVNULL if use_prompt_file else subprocess.PIPE,
+            stdout=child_log_handle if child_log_handle is not None else subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
@@ -456,23 +524,35 @@ class CommandApplyAgent(ApplyAgent):
             _agent_procs[worker_id] = proc
 
         try:
-            if proc.stdin is None:
-                raise RuntimeError("Command agent process missing stdin pipe")
-            proc.stdin.write(prompt)
-            proc.stdin.close()
+            if not use_prompt_file:
+                if proc.stdin is None:
+                    raise RuntimeError("Command agent process missing stdin pipe")
+                proc.stdin.write(prompt)
+                proc.stdin.close()
 
-            text_parts, stats, reader_done, reader_thread, last_output = _start_output_collector(
-                proc, worker_log, on_action
-            )
-            _wait_for_agent_process(
-                proc,
-                timeout=self.timeout,
-                silence_timeout=self.silence_timeout,
-                worker_log=worker_log,
-                reader_done=reader_done,
-                reader_thread=reader_thread,
-                last_output=last_output,
-            )
+            if use_local_apply_agent:
+                _wait_for_logged_agent_process(
+                    proc,
+                    timeout=self.timeout,
+                    silence_timeout=self.silence_timeout,
+                    worker_log=worker_log,
+                    start_size=log_start_size,
+                )
+                text_parts = [_read_log_delta(worker_log, log_start_size)]
+                stats: dict[str, Any] = {}
+            else:
+                text_parts, stats, reader_done, reader_thread, last_output = _start_output_collector(
+                    proc, worker_log, on_action
+                )
+                _wait_for_agent_process(
+                    proc,
+                    timeout=self.timeout,
+                    silence_timeout=self.silence_timeout,
+                    worker_log=worker_log,
+                    reader_done=reader_done,
+                    reader_thread=reader_thread,
+                    last_output=last_output,
+                )
             return AgentRunResult(
                 output="\n".join(text_parts),
                 duration_ms=int((time.time() - start) * 1000),
@@ -484,3 +564,5 @@ class CommandApplyAgent(ApplyAgent):
                 _agent_procs.pop(worker_id, None)
             if proc.poll() is None:
                 _kill_process_tree(proc.pid)
+            if child_log_handle is not None:
+                child_log_handle.close()

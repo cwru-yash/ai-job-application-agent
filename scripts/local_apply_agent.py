@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from email import header, policy
 from email.parser import BytesParser
@@ -51,11 +51,13 @@ class PromptContext:
     job_title: str
     company: str
     job_url: str
+    job_description: str
     resume_pdf: str
     cover_pdf: str
     resume_text: str
     cover_text: str
     dry_run: bool
+    qualitative_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -179,6 +181,11 @@ def parse_prompt(prompt: str) -> PromptContext:
         job_title=extract_line(prompt, "Title:"),
         company=extract_line(prompt, "Company:"),
         job_url=extract_line(prompt, "URL:"),
+        job_description=extract_section(
+            prompt,
+            "== JOB DESCRIPTION (use for qualitative answers) ==",
+            "== FILES ==",
+        ),
         resume_pdf=extract_line(prompt, "Resume PDF (upload this):"),
         cover_pdf=extract_line(prompt, "Cover Letter PDF (upload if asked):"),
         resume_text=extract_section(
@@ -377,10 +384,22 @@ def company_override_bucket(data: dict[str, Any], company: str) -> list[dict[str
     return bucket
 
 
-def merge_memory_question_entry(target: list[dict[str, Any]], fragments: list[str], answer: Any, ctx: PromptContext) -> bool:
+def merge_memory_question_entry(
+    target: list[dict[str, Any]],
+    fragments: list[str],
+    answer: Any,
+    ctx: PromptContext,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
     cleaned_fragments = [normalize_override_key(item) for item in fragments if normalize_override_key(item)]
     if not cleaned_fragments or answer in (None, "", []):
         return False
+    clean_metadata = {
+        str(key): value
+        for key, value in (metadata or {}).items()
+        if value not in (None, "", [], {})
+    }
     for existing in target:
         existing_fragments = [normalize_override_key(item) for item in existing.get("match_any", []) if item]
         if sorted(existing_fragments) == sorted(cleaned_fragments) and existing.get("answer") == answer:
@@ -391,15 +410,19 @@ def merge_memory_question_entry(target: list[dict[str, Any]], fragments: list[st
             if ctx.job_title and ctx.job_title not in titles:
                 titles.append(ctx.job_title)
                 changed = True
+            for key, value in clean_metadata.items():
+                if existing.get(key) != value:
+                    existing[key] = value
+                    changed = True
             return changed
-    target.append(
-        {
-            "match_any": cleaned_fragments,
-            "answer": answer,
-            "last_seen_at": now_iso(),
-            "job_titles": [ctx.job_title] if ctx.job_title else [],
-        }
-    )
+    entry = {
+        "match_any": cleaned_fragments,
+        "answer": answer,
+        "last_seen_at": now_iso(),
+        "job_titles": [ctx.job_title] if ctx.job_title else [],
+    }
+    entry.update(clean_metadata)
+    target.append(entry)
     return True
 
 
@@ -476,6 +499,10 @@ def persist_company_question_memory(
             entry.get("match_any", []),
             entry.get("answer"),
             ctx,
+            metadata={
+                key: entry.get(key)
+                for key in ("label", "source", "generated_at", "accepted_at", "acceptance_level")
+            },
         )
     for item in seen_questions:
         if isinstance(item, dict):
@@ -506,6 +533,8 @@ def remember_learned_answer(
     learned: list[dict[str, Any]],
     fragments: list[str],
     answers: list[str],
+    *,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     cleaned_fragments = []
     for fragment in fragments:
@@ -515,6 +544,11 @@ def remember_learned_answer(
     cleaned_answers = [str(answer).strip() for answer in answers if str(answer).strip()]
     if not cleaned_fragments or not cleaned_answers:
         return
+    clean_metadata = {
+        str(key): value
+        for key, value in (metadata or {}).items()
+        if value not in (None, "", [], {})
+    }
     answer_value: str | list[str]
     answer_value = cleaned_answers[0] if len(cleaned_answers) == 1 else cleaned_answers
     for entry in learned:
@@ -524,13 +558,39 @@ def remember_learned_answer(
             sorted(existing_fragments) == sorted(cleaned_fragments)
             and existing_answer == answer_value
         ):
+            for key, value in clean_metadata.items():
+                if entry.get(key) != value:
+                    entry[key] = value
             return
-    learned.append(
-        {
-            "match_any": cleaned_fragments,
-            "answer": answer_value,
-        }
-    )
+    learned.append({"match_any": cleaned_fragments, "answer": answer_value, **clean_metadata})
+
+
+def record_successful_qualitative_answers(
+    target: list[dict[str, Any]],
+    page_answers: list[dict[str, Any]],
+    *,
+    acceptance_level: str,
+) -> None:
+    if not page_answers:
+        return
+    accepted_at = now_iso()
+    for entry in page_answers:
+        answer = normalize_space(str(entry.get("answer") or ""))
+        fragments = [normalize_override_key(item) for item in entry.get("match_any", []) if item]
+        if not answer or not fragments:
+            continue
+        remember_learned_answer(
+            target,
+            fragments,
+            [answer],
+            metadata={
+                "label": entry.get("label"),
+                "source": entry.get("source", "llm_generated"),
+                "generated_at": entry.get("generated_at"),
+                "accepted_at": accepted_at,
+                "acceptance_level": acceptance_level,
+            },
+        )
 
 
 def persist_company_question_answers(ctx: PromptContext, learned: list[dict[str, Any]]) -> None:
@@ -1653,7 +1713,13 @@ def llm_text(args: argparse.Namespace, prompt: str) -> str:
     if not args.model:
         return ""
     messages = [
-        {"role": "system", "content": "Write a short, professional job application response in 2-3 sentences."},
+        {
+            "role": "system",
+            "content": (
+                "Write concise, professional job application text. "
+                "Follow the user's instructions exactly, stay factual, and return plain text only."
+            ),
+        },
         {"role": "user", "content": prompt},
     ]
     try:
@@ -2151,19 +2217,290 @@ def applicant_value(profile: dict[str, Any], key: str) -> str:
     return values.get(key, "")
 
 
-def open_ended_answer(field_label: str, ctx: PromptContext, profile: dict[str, Any], args: argparse.Namespace) -> str:
+QUALITATIVE_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "been",
+    "being",
+    "between",
+    "both",
+    "company",
+    "describe",
+    "experience",
+    "from",
+    "have",
+    "into",
+    "role",
+    "tell",
+    "that",
+    "their",
+    "them",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+    "your",
+}
+
+
+def split_context_chunks(text: str, *, max_chunk_chars: int = 500) -> list[str]:
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    blocks = [normalize_space(block) for block in re.split(r"\n\s*\n+", normalized) if normalize_space(block)]
+    chunks: list[str] = []
+    for block in blocks:
+        if len(block) <= max_chunk_chars:
+            chunks.append(block)
+            continue
+        sentences = [normalize_space(part) for part in re.split(r"(?<=[.!?])\s+", block) if normalize_space(part)]
+        current = ""
+        for sentence in sentences:
+            candidate = f"{current} {sentence}".strip()
+            if current and len(candidate) > max_chunk_chars:
+                chunks.append(current)
+                current = sentence
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+    return chunks
+
+
+def keyword_tokens(text: str) -> set[str]:
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9+#./-]*", normalize_override_key(text))
+        if len(token) >= 3 and token not in QUALITATIVE_STOPWORDS
+    }
+    return tokens
+
+
+def select_relevant_snippets(
+    question: str,
+    source_text: str,
+    *,
+    role_hint: str = "",
+    max_chunks: int,
+    max_chars: int,
+) -> list[str]:
+    chunks = split_context_chunks(source_text)
+    if not chunks:
+        return []
+    q_tokens = keyword_tokens(question)
+    role_tokens = keyword_tokens(role_hint)
+
+    scored: list[tuple[int, int, str]] = []
+    for idx, chunk in enumerate(chunks):
+        c_tokens = keyword_tokens(chunk)
+        overlap = len(q_tokens & c_tokens)
+        role_overlap = len(role_tokens & c_tokens)
+        score = overlap * 5 + role_overlap * 2
+        if score == 0 and idx >= max_chunks * 2:
+            continue
+        scored.append((score, idx, chunk))
+
+    if not scored:
+        scored = [(0, idx, chunk) for idx, chunk in enumerate(chunks[:max_chunks])]
+
+    top = sorted(scored, key=lambda item: (-item[0], item[1]))[: max(max_chunks, 1)]
+    selected: list[str] = []
+    total_chars = 0
+    for _score, _idx, chunk in top:
+        if total_chars and total_chars + len(chunk) > max_chars:
+            continue
+        selected.append(chunk)
+        total_chars += len(chunk)
+        if len(selected) >= max_chunks or total_chars >= max_chars:
+            break
+    return selected
+
+
+def candidate_fact_lines(profile: dict[str, Any]) -> list[str]:
+    facts = [
+        ("Current title", applicant_value(profile, "current_title")),
+        ("Years of experience", applicant_value(profile, "years")),
+        ("Education", applicant_value(profile, "education")),
+        ("Location", ", ".join(part for part in [
+            applicant_value(profile, "city"),
+            applicant_value(profile, "state"),
+            applicant_value(profile, "country"),
+        ] if part)),
+        ("Work authorization", applicant_value(profile, "authorized")),
+        ("Sponsorship needed", applicant_value(profile, "sponsorship")),
+        ("Work permit type", applicant_value(profile, "permit_type")),
+        ("Available to start", applicant_value(profile, "start_date")),
+    ]
+    return [f"{label}: {value}" for label, value in facts if value]
+
+
+def conservative_open_ended_fallback(ctx: PromptContext) -> str:
     fallback = short_cover_text(ctx.cover_text)
     if fallback:
         return fallback
-    prompt = (
-        f"Job title: {ctx.job_title}\n"
-        f"Company: {ctx.company}\n"
-        f"Candidate title: {applicant_value(profile, 'current_title')}\n"
-        f"Question: {field_label}\n"
-        "Answer in 2-3 sentences, concrete and professional."
+    return (
+        f"I am excited about {ctx.job_title} at {ctx.company} because it aligns with my background in "
+        "AI-driven software and backend systems. I would bring hands-on experience building reliable, "
+        "production-focused engineering solutions."
     )
-    generated = llm_text(args, prompt)
-    return generated.strip() or f"I am excited about {ctx.job_title} at {ctx.company} because it matches my background in AI-driven software and backend systems."
+
+
+def should_route_to_qualitative_llm(field: dict[str, Any]) -> bool:
+    label = normalize_override_key(
+        " ".join(
+            part for part in [field.get("label"), field.get("name"), field.get("placeholder")] if part
+        )
+    )
+    if not label:
+        return False
+
+    excluded_fragments = (
+        "password",
+        "security code",
+        "verification code",
+        "email address",
+        "phone number",
+        "linkedin",
+        "github",
+        "website",
+        "portfolio",
+        "salary",
+        "compensation",
+        "pay expectation",
+        "first name",
+        "last name",
+        "full name",
+        "address",
+        "city",
+        "state",
+        "province",
+        "country",
+        "postal code",
+        "zip code",
+        "resume",
+        "cover letter",
+        "upload",
+        "attachment",
+        "autofill",
+    )
+    if any(fragment in label for fragment in excluded_fragments):
+        return False
+
+    if field.get("tag") == "textarea":
+        return True
+
+    qualitative_markers = (
+        "why ",
+        "what interests",
+        "tell us",
+        "describe",
+        "summary",
+        "anything else",
+        "additional information",
+        "anything you would like us to know",
+        "motivation",
+        "background",
+        "relevant experience",
+    )
+    return any(marker in label for marker in qualitative_markers)
+
+
+def build_qualitative_prompt(field_label: str, ctx: PromptContext, profile: dict[str, Any]) -> str:
+    role_hint = f"{ctx.job_title} {ctx.company}".strip()
+    jd_snippets = select_relevant_snippets(
+        field_label,
+        ctx.job_description,
+        role_hint=role_hint,
+        max_chunks=4,
+        max_chars=1800,
+    )
+    resume_snippets = select_relevant_snippets(
+        field_label,
+        ctx.resume_text,
+        role_hint=role_hint,
+        max_chunks=4,
+        max_chars=1800,
+    )
+    cover_snippets = select_relevant_snippets(
+        field_label,
+        ctx.cover_text,
+        role_hint=role_hint,
+        max_chunks=2,
+        max_chars=900,
+    )
+    candidate_facts = candidate_fact_lines(profile)
+
+    def bullet_block(items: list[str], empty: str) -> str:
+        if not items:
+            return f"- {empty}"
+        return "\n".join(f"- {item}" for item in items)
+
+    return (
+        "Write a concise job application answer.\n\n"
+        f"Question:\n{normalize_space(field_label)}\n\n"
+        f"Company: {ctx.company}\n"
+        f"Role: {ctx.job_title}\n\n"
+        "Rules:\n"
+        "- Write in first person.\n"
+        "- Keep it to 2-4 sentences unless the question clearly asks for more detail.\n"
+        "- Stay factual and grounded in the provided materials.\n"
+        "- Do not invent employers, tools, metrics, credentials, or years.\n"
+        "- Do not mention the resume or cover letter explicitly.\n"
+        "- Plain text only.\n\n"
+        "Candidate facts:\n"
+        f"{bullet_block(candidate_facts, 'Use only the resume and cover letter context below.')}\n\n"
+        "Relevant job description:\n"
+        f"{bullet_block(jd_snippets, 'Not available.')}\n\n"
+        "Relevant tailored resume details:\n"
+        f"{bullet_block(resume_snippets, 'Not available.')}\n\n"
+        "Relevant cover letter details:\n"
+        f"{bullet_block(cover_snippets, 'Not available.')}\n\n"
+        "Final answer:"
+    )
+
+
+def qualitative_memory_entry(field_label: str, answer: str) -> dict[str, Any]:
+    normalized = normalize_override_key(field_label)
+    return {
+        "match_any": [normalized],
+        "answer": normalize_space(answer),
+        "label": normalize_space(field_label),
+        "source": "llm_generated",
+        "generated_at": now_iso(),
+    }
+
+
+def open_ended_answer(
+    field: dict[str, Any],
+    ctx: PromptContext,
+    profile: dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, Any] | None]:
+    field_label = normalize_space(str(field.get("label") or field.get("name") or "application question"))
+    cached = ctx.qualitative_cache.get(normalize_override_key(field_label))
+    if cached:
+        return str(cached.get("answer") or ""), cached
+
+    override = lookup_question_override(ctx, field_label, field.get("options") or [])
+    if override is not None:
+        return override, None
+
+    prompt = build_qualitative_prompt(field_label, ctx, profile)
+    generated = normalize_space(llm_text(args, prompt))
+    if generated:
+        entry = qualitative_memory_entry(field_label, generated)
+        ctx.qualitative_cache[normalize_override_key(field_label)] = entry
+        if args.verbose:
+            log(
+                f"ACTION: qualitative answer generated label={field_label!r} "
+                f"answer={generated[:160]!r}"
+            )
+        return generated, entry
+    return conservative_open_ended_fallback(ctx), None
 
 
 def resolve_field_value(field: dict[str, Any], profile: dict[str, Any], ctx: PromptContext, args: argparse.Namespace) -> Any:
@@ -2250,6 +2587,15 @@ def resolve_field_value(field: dict[str, Any], profile: dict[str, Any], ctx: Pro
     if any(term in label for term in ("authorized to work", "legally authorized", "work authorization", "eligible to work", "eligible for work")):
         desired = applicant_value(profile, "authorized")
         return select_best_option(options, desired) if options else desired
+    if "based and plan to work from the us" in label:
+        desired = "Yes"
+        return select_best_option(options, desired) if options else desired
+    if "based and plan to work from canada" in label:
+        desired = "No" if applicant_value(profile, "country").lower() not in {"canada", "ca"} else "Yes"
+        return select_best_option(options, desired) if options else desired
+    if "based in quebec" in label:
+        desired = "No"
+        return select_best_option(options, desired) if options else desired
     if any(term in label for term in ("sponsorship", "sponsor", "visa support", "require visa")):
         desired = applicant_value(profile, "sponsorship")
         return select_best_option(options, desired) if options else desired
@@ -2304,10 +2650,6 @@ def resolve_field_value(field: dict[str, Any], profile: dict[str, Any], ctx: Pro
     ):
         desired = "No"
         return select_best_option(options, desired) if options else desired
-    if field.get("tag") == "textarea":
-        return open_ended_answer(field.get("label", "application question"), ctx, profile, args)
-    if "why" in label or "motivation" in label or "tell us" in label or "summary" in label:
-        return open_ended_answer(field.get("label", "application question"), ctx, profile, args)
     return None
 
 
@@ -2435,6 +2777,13 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
     if not desired:
         return False
     desired_variants = greenhouse_value_variants(field, value)
+    log(f"ACTION: greenhouse select start label={label!r} desired={desired!r}")
+    if "country" in label:
+        if click_contains(page, ["Select country"], tags="button, [role='button'], div, span"):
+            page.wait_for_timeout(300)
+            if choose_text_option(page, desired_variants, allow_first_visible=True):
+                log(f"ACTION: greenhouse select committed label={label!r} value={desired_variants[0]!r}")
+                return True
     try:
         locator.scroll_into_view_if_needed(timeout=3000)
     except Exception:
@@ -2460,6 +2809,7 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
     if choose_text_option(page, desired_variants, allow_first_visible=True):
         for candidate in desired_variants:
             if greenhouse_select_committed(locator, candidate):
+                log(f"ACTION: greenhouse select committed label={label!r} value={candidate!r}")
                 return True
     for candidate in desired_variants:
         try:
@@ -2467,6 +2817,7 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
             locator.press("Tab")
             page.wait_for_timeout(500)
             if greenhouse_select_committed(locator, candidate):
+                log(f"ACTION: greenhouse select committed label={label!r} value={candidate!r}")
                 return True
         except Exception:
             continue
@@ -2477,6 +2828,7 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
             page.wait_for_timeout(500)
             current = normalize_space(locator.input_value(timeout=1000))
             if current:
+                log(f"ACTION: greenhouse select committed label={label!r} value={current!r}")
                 return True
         except Exception:
             pass
@@ -2489,6 +2841,7 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
             page.wait_for_timeout(300)
             current = normalize_space(locator.input_value(timeout=1000))
             if current:
+                log(f"ACTION: greenhouse select committed label={label!r} value={current!r}")
                 return True
         except Exception:
             pass
@@ -2502,6 +2855,7 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
             locator.press("Enter")
             page.wait_for_timeout(700)
             if greenhouse_select_committed(locator, candidate):
+                log(f"ACTION: greenhouse select committed label={label!r} value={candidate!r}")
                 return True
         except Exception:
             try:
@@ -2509,6 +2863,7 @@ def fill_greenhouse_select_like(page, locator, field: dict[str, Any], value: Any
                 page.keyboard.press("Enter")
                 page.wait_for_timeout(700)
                 if greenhouse_select_committed(locator, candidate):
+                    log(f"ACTION: greenhouse select committed label={label!r} value={candidate!r}")
                     return True
             except Exception:
                 continue
@@ -2624,28 +2979,37 @@ def fill_workday_experience_dates(page, fields: list[dict[str, Any]]) -> tuple[i
     return changed, {apg_id for apg_id in handled if apg_id}
 
 
-def fill_visible_fields(page, profile: dict[str, Any], ctx: PromptContext, args: argparse.Namespace) -> int:
+def fill_visible_fields(
+    page,
+    profile: dict[str, Any],
+    ctx: PromptContext,
+    args: argparse.Namespace,
+) -> tuple[int, list[dict[str, Any]]]:
     fields = annotate_fields(page)
     changed, handled_apg_ids = fill_workday_experience_dates(page, fields)
+    qualitative_answers: list[dict[str, Any]] = []
     for field in fields:
         if field.get("apgId") in handled_apg_ids:
             continue
         value = resolve_field_value(field, profile, ctx, args)
-        if args.verbose:
-            preview = normalize_space(str(value))[:80] if value is not None else "None"
-            log(
-                f"ACTION: fill field label={normalize_space(str(field.get('label') or field.get('name') or ''))!r} "
-                f"type={field.get('type') or field.get('tag') or ''} value={preview!r}"
-            )
+        qualitative_entry = None
+        if value is None and should_route_to_qualitative_llm(field):
+            value, qualitative_entry = open_ended_answer(field, ctx, profile, args)
+        preview = normalize_space(str(value))[:80] if value is not None else "None"
+        log(
+            f"ACTION: fill field label={normalize_space(str(field.get('label') or field.get('name') or ''))!r} "
+            f"type={field.get('type') or field.get('tag') or ''} value={preview!r}"
+        )
         if fill_field(page, field, value):
             changed += 1
-            if args.verbose:
-                log("ACTION: fill field committed")
-        elif args.verbose and value is not None:
+            log("ACTION: fill field committed")
+            if qualitative_entry:
+                qualitative_answers.append(dict(qualitative_entry))
+        elif value is not None:
             log("ACTION: fill field skipped_or_failed")
     if changed:
         page.wait_for_timeout(1000)
-    return changed
+    return changed, qualitative_answers
 
 
 def upload_matching_file_input(page, keywords: tuple[str, ...], path: str) -> bool:
@@ -4266,6 +4630,7 @@ def run_workday(page, profile: dict[str, Any], ctx: PromptContext, args: argpars
     prefer_manual = False
     manual_fallback_used = False
     learned_answers: list[dict[str, Any]] = []
+    accepted_qualitative_answers: list[dict[str, Any]] = []
     start_workday_application(page, prefer_manual=prefer_manual)
     stagnant = 0
     last_signature = ""
@@ -4274,7 +4639,11 @@ def run_workday(page, profile: dict[str, Any], ctx: PromptContext, args: argpars
         if result.startswith("RESULT:APPLIED"):
             persist_company_question_answers(ctx, learned_answers)
         suggestions = build_workday_question_suggestions(page, ctx, profile, learned_answers)
-        persist_company_question_memory(ctx, learned_answers, build_workday_memory_entries(suggestions))
+        persist_company_question_memory(
+            ctx,
+            learned_answers + accepted_qualitative_answers,
+            build_workday_memory_entries(suggestions),
+        )
         persist_question_override_suggestions(ctx, suggestions)
         append_workday_question_review(page, ctx, result, suggestions)
         return result
@@ -4352,13 +4721,26 @@ def run_workday(page, profile: dict[str, Any], ctx: PromptContext, args: argpars
         if blocker:
             return finalize_workday_result(f"RESULT:FAILED:{blocker}")
 
-        changed = override_changed + fill_visible_fields(page, profile, ctx, args)
+        field_changes, page_qualitative_answers = fill_visible_fields(page, profile, ctx, args)
+        changed = override_changed + field_changes
         nav_result, nav_clicked = click_primary_navigation(page, ctx.dry_run)
         if nav_result:
+            if nav_result.startswith("RESULT:APPLIED"):
+                record_successful_qualitative_answers(
+                    accepted_qualitative_answers,
+                    page_qualitative_answers,
+                    acceptance_level="submitted",
+                )
             return finalize_workday_result(nav_result)
 
         current_text = page_text(page)
         signature = workday_signature(page, current_text)
+        if nav_clicked and signature != last_signature and not visible_error_texts(page):
+            record_successful_qualitative_answers(
+                accepted_qualitative_answers,
+                page_qualitative_answers,
+                acceptance_level="page_advanced",
+            )
         if not changed and not nav_clicked and signature == last_signature:
             stagnant += 1
         else:
@@ -4381,6 +4763,7 @@ def run_greenhouse(page, profile: dict[str, Any], ctx: PromptContext, args: argp
     stagnant = 0
     last_signature = ""
     learned_answers: list[dict[str, Any]] = []
+    accepted_qualitative_answers: list[dict[str, Any]] = []
     seen_questions: list[str] = []
     seen_keys: set[str] = set()
 
@@ -4403,7 +4786,7 @@ def run_greenhouse(page, profile: dict[str, Any], ctx: PromptContext, args: argp
         remember_greenhouse_snapshot()
         if result.startswith("RESULT:APPLIED"):
             persist_company_question_answers(ctx, learned_answers)
-        persist_company_question_memory(ctx, learned_answers, seen_questions)
+        persist_company_question_memory(ctx, learned_answers + accepted_qualitative_answers, seen_questions)
         return result
 
     for step in range(20):
@@ -4437,7 +4820,7 @@ def run_greenhouse(page, profile: dict[str, Any], ctx: PromptContext, args: argp
                 continue
 
         changed = greenhouse_prepare_uploads(page, ctx)
-        field_changes = fill_visible_fields(page, profile, ctx, args)
+        field_changes, page_qualitative_answers = fill_visible_fields(page, profile, ctx, args)
         changed += field_changes
         security_result, security_changes = fill_greenhouse_security_code(page, profile, ctx)
         if security_result:
@@ -4449,10 +4832,22 @@ def run_greenhouse(page, profile: dict[str, Any], ctx: PromptContext, args: argp
         if nav_clicked:
             log('ACTION: greenhouse clicked primary navigation')
         if nav_result:
+            if nav_result.startswith("RESULT:APPLIED"):
+                record_successful_qualitative_answers(
+                    accepted_qualitative_answers,
+                    page_qualitative_answers,
+                    acceptance_level="submitted",
+                )
             return finalize_greenhouse_result(nav_result)
 
         current_text = page_text(page)
         signature = workday_signature(page, current_text)
+        if nav_clicked and signature != last_signature and not visible_error_texts(page):
+            record_successful_qualitative_answers(
+                accepted_qualitative_answers,
+                page_qualitative_answers,
+                acceptance_level="page_advanced",
+            )
         if not changed and not nav_clicked and signature == last_signature:
             stagnant += 1
         else:
